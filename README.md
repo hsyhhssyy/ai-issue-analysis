@@ -2,70 +2,24 @@
 
 一个通用的 GitHub composite action，用来在 Issue 打开或被评论时调用 Copilot CLI 做分析，并把分析过程和最终结论持续回写到同一条评论里。
 
-这个仓库现在只提供 `action.yml`。各项目自己的 workflow 仍然需要保留：
+## 快速接入
 
-- `on:` 触发器
-- 何时触发分析的 `if:` 条件
-- 各项目自己的 secrets
+1. 请确保你有 Copilot Pro (当前仅支持 Copilot，以后可能适配 codex 等更多工具，欢迎 ISSUE 催更~）
+2. 前往 [GitHub PAT](https://github.com/settings/personal-access-tokens) 新增一个 token  
+  - Expiration(过期时间): 设为一年以内（太长反而会报错）
+  - Add Premissions(添加权限): 勾上所有 Copilot 相关的
+  - 点最下面绿色的 Generate，得到一个 token，复制下来保存好
+3. 在你的 GitHub 仓库 - Settings - secrets - actions - new repository secret, Name: `COPILOT_GITHUB_TOKEN`, Secret: 2 中生成的那个
+4. 把下面两个文件拷贝到你的仓库里，文件夹不要变  
+  - [`.github/workflows/ai-issue-analysis.yml`](.github/workflows/ai-issue-analysis.yml)
+  - [`.claude/skills/generic-issue-log-analysis/SKILL.md`](.claude/skills/generic-issue-log-analysis/SKILL.md)
+5. 自己提个 issue 测试下，或者在以前的 issue 里 `@github-actions`
 
-最小示例：
+> [!TIP]
+>
+> 如果你的项目有固定的日志包命名、关键日志路径、附件目录、模块映射或上游依赖，建议在这个通用版基础上微调 `SKILL.md`，分析质量会更高。
 
-```yaml
-name: Issue AI Analysis
-
-on:
-  issues:
-    types: [opened]
-  issue_comment:
-    types: [created]
-  workflow_dispatch:
-    inputs:
-      issue_number:
-        description: Issue number to analyze
-        required: true
-        type: number
-
-jobs:
-  analyze:
-    if: |
-      (github.event_name == 'issues' && github.event.action == 'opened') ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'issue_comment' &&
-       github.event.action == 'created' &&
-       contains(github.event.comment.body, '@YourBot') &&
-       github.event.comment.user.type != 'Bot')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      issues: write
-    steps:
-      - id: analysis
-        uses: Misteo/ai-issue-analysis@main
-        with:
-          github-token: ${{ secrets.PROJECT_BOT_TOKEN }}
-          copilot-github-token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
-          bot-name: '@YourBot'
-          prompt-template: |
-            分析 GitHub Issue #{{issue_number}}。
-            请结合仓库代码、现有 issue 信息和必要的日志判断问题原因。
-            把最终结论写到 {{copilot_answer_file}}。
-          comment-prompt-template: |
-            补充要求：{{comment_body}}
-
-      - name: Consume outputs
-        env:
-          ANALYSIS_PROMPT: ${{ steps.analysis.outputs.analysis-prompt }}
-          COMMENT_ID: ${{ steps.analysis.outputs.comment-id }}
-          COMMENT_URL: ${{ steps.analysis.outputs.comment-url }}
-          COPILOT_OUTPUT: ${{ steps.analysis.outputs.copilot-output }}
-          FINAL_CONCLUSION: ${{ steps.analysis.outputs.final-conclusion }}
-        run: |
-          printf '%s\n' "$ANALYSIS_PROMPT"
-          echo "comment_id=$COMMENT_ID"
-          echo "comment_url=$COMMENT_URL"
-          printf '%s\n' "$COPILOT_OUTPUT"
-          printf '%s\n' "$FINAL_CONCLUSION"
-```
+## 输入说明
 
 `issue-number` input 通常可以不传：
 
@@ -89,7 +43,7 @@ jobs:
 - `stream-update-interval-seconds`: 流式更新评论的间隔秒数，默认 `30`
 - `checkout-repository`: 是否在 action 内部自动执行 `actions/checkout`，默认 `true`
 
-主要 outputs：
+## 输出说明
 
 - `issue-number`: 本次运行实际解析出的 Issue 编号
 - `comment-id`: 创建并持续更新的评论 ID
@@ -99,12 +53,12 @@ jobs:
 - `final-conclusion`: Copilot 写入 `copilot-answer-file` 的最终结论
 - `analysis-prompt`、`copilot-output` 和 `final-conclusion` 在过长时会为适配 GitHub Actions output 大小限制而被截断；完整内容优先从 artifacts 读取
 
-Artifacts：
+## 上传产物
 
 - `copilot-output-issue-<issue-number>-comment-<comment-id>`: 完整执行日志，包含启动前参数、prompt 正文和 Copilot CLI 输出
 - `final-conclusion-issue-<issue-number>-comment-<comment-id>`: 最终结论文本
 
-Skill 配合：
+## Skill 配合
 
 - 这个 action 只负责 GitHub Actions 编排、评论更新、Copilot CLI 调用和 prompt 拼接，不内置项目领域知识
 - 对需要分析 issue 附件、日志包、运行时配置、跨仓库代码路径的项目，建议配套提供项目自己的 issue 分析 skill
@@ -113,7 +67,7 @@ Skill 配合：
 - 最佳实践参考，MaaEnd: `https://github.com/MaaEnd/MaaEnd/blob/ci/prompt/.claude/skills/maaend-issue-log-analysis/SKILL.md`
 - 最佳实践参考，MaaAssistantArknights: `https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/dev-v2/.claude/skills/maa-issue-log-analysis/SKILL.md`
 
-模板变量：
+## 模板变量：
 
 - `{{issue_number}}`
 - `{{copilot_answer_file}}`
@@ -121,7 +75,7 @@ Skill 配合：
 - `{{repository}}`
 - `{{event_name}}`
 
-行为说明：
+## 行为说明：
 
 - action 内部会自动 `checkout` 调用方仓库
 - 如果调用方已经自己 checkout，或者前置步骤会生成工作区文件，可以把 `checkout-repository` 设为 `false`
@@ -131,3 +85,4 @@ Skill 配合：
 - `copilot-output` 会包含 Copilot 启动前的参数打印和 prompt 正文，不再只是 Copilot 进程本身的 stdout/stderr
 - 会上传 Copilot 原始输出和最终结论两个 artifacts
 - 最终评论会包含最终结论、完整分析过程折叠块，以及当前 Actions 运行链接
+

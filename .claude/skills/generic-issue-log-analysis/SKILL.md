@@ -1,6 +1,6 @@
 ---
 name: generic-issue-log-analysis
-description: 分析当前仓库或用户明确指定的公开 GitHub issue（完整 URL 或 `#1234`）。优先读取 issue 正文和评论，按需下载日志包、截图、配置导出和崩溃转储，建立时间线后结合仓库代码、文档和必要的上游依赖判断根因，并给出修复建议或下一步排查建议。适合给 issue 自动分析 bot 直接配套使用；如果项目结构更明确，可在此基础上微调。
+description: 分析当前仓库或用户明确指定的公开 GitHub issue（完整 URL 或 `#1234`）。优先读取 issue 正文和评论，按需下载日志包、截图、配置导出和崩溃转储，建立时间线后结合仓库代码、文档和必要的上游依赖判断根因，并给出修复建议或下一步排查建议。
 ---
 
 # Generic Issue Log Analysis

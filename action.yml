@@ -76,6 +76,18 @@ outputs:
   comment-id:
     description: The issue comment ID that was created and then updated.
     value: ${{ steps.initial_comment.outputs.comment-id }}
+  comment-url:
+    description: The URL of the issue comment that was created and then updated.
+    value: ${{ steps.export_results.outputs.comment-url }}
+  analysis-prompt:
+    description: Final rendered prompt passed to Copilot for this run.
+    value: ${{ steps.export_results.outputs.analysis-prompt }}
+  copilot-output:
+    description: Execution log including pre-run parameters, prompt, and Copilot stdout and stderr.
+    value: ${{ steps.export_results.outputs.copilot-output }}
+  final-conclusion:
+    description: Final conclusion content produced by Copilot.
+    value: ${{ steps.export_results.outputs.final-conclusion }}
 
 runs:
   using: composite
@@ -126,8 +138,11 @@ runs:
         {
           echo "analysis_prompt_file=$CACHE_DIR/analysis_prompt.txt"
           echo "copilot_output_file=$CACHE_DIR/copilot_output.log"
+          echo "copilot_execution_log_file=$CACHE_DIR/copilot_execution.log"
+          echo "copilot_output_artifact_file=$CACHE_DIR/copilot_output.txt"
           echo "comment_body_file=$CACHE_DIR/comment_body.txt"
           echo "final_comment_file=$CACHE_DIR/final_comment.md"
+          echo "final_conclusion_artifact_file=$CACHE_DIR/final_conclusion.md"
           echo "details_end=</details>"
           echo "action_link<<EOF"
           echo "🔗 [$ACTION_LINK_TEXT](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
@@ -213,10 +228,13 @@ runs:
       env:
         COPILOT_GITHUB_TOKEN: ${{ inputs.copilot-github-token }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
+        GITHUB_SERVER_URL: ${{ github.server_url }}
         COMMENT_ID: ${{ steps.initial_comment.outputs.comment-id }}
+        ISSUE_NUMBER: ${{ steps.issue_number.outputs.issue_number }}
         REPO: ${{ github.repository }}
         ANALYSIS_PROMPT_FILE: ${{ steps.runtime.outputs.analysis_prompt_file }}
         OUTPUT_FILE: ${{ steps.runtime.outputs.copilot_output_file }}
+        EXECUTION_LOG_FILE: ${{ steps.runtime.outputs.copilot_execution_log_file }}
         BODY_FILE: ${{ steps.runtime.outputs.comment_body_file }}
         INITIAL_BODY: ${{ inputs.initial-comment-body }}
         ACTION_LINK: ${{ steps.runtime.outputs.action_link }}
@@ -226,10 +244,32 @@ runs:
         COPILOT_REASONING_EFFORT: ${{ inputs.copilot-reasoning-effort }}
         STREAM_UPDATE_INTERVAL: ${{ inputs.stream-update-interval-seconds }}
       run: |
+        COMMENT_URL="$GITHUB_SERVER_URL/$REPO/issues/$ISSUE_NUMBER#issuecomment-$COMMENT_ID"
+
+        : > "$OUTPUT_FILE"
+        : > "$EXECUTION_LOG_FILE"
+        {
+          echo "Copilot invocation parameters:"
+          echo "  repo: $REPO"
+          echo "  issue-number: $ISSUE_NUMBER"
+          echo "  comment-id: $COMMENT_ID"
+          echo "  comment-url: $COMMENT_URL"
+          echo "  model: $COPILOT_MODEL"
+          echo "  reasoning-effort: $COPILOT_REASONING_EFFORT"
+          echo "  stream-update-interval-seconds: $STREAM_UPDATE_INTERVAL"
+          echo "  analysis-prompt-file: $ANALYSIS_PROMPT_FILE"
+          echo "  output-file: $OUTPUT_FILE"
+          echo "  body-file: $BODY_FILE"
+          echo "  command: copilot --yolo --model \"$COPILOT_MODEL\" --reasoning-effort \"$COPILOT_REASONING_EFFORT\" --prompt \"<contents of $ANALYSIS_PROMPT_FILE>\""
+          echo "Prompt content begins"
+          cat "$ANALYSIS_PROMPT_FILE"
+          echo "Prompt content ends"
+        } | tee -a "$EXECUTION_LOG_FILE"
+
         copilot --yolo --model "$COPILOT_MODEL" --reasoning-effort "$COPILOT_REASONING_EFFORT" \
           --prompt "$(cat "$ANALYSIS_PROMPT_FILE")" > "$OUTPUT_FILE" 2>&1 &
         COPILOT_PID=$!
-        echo "Copilot started with PID $COPILOT_PID"
+        echo "Copilot started with PID $COPILOT_PID" | tee -a "$EXECUTION_LOG_FILE"
 
         last_content=""
 
@@ -274,11 +314,21 @@ runs:
 
         wait "$COPILOT_PID"
 
+        {
+          echo
+          echo "Copilot output begins"
+          if [ -f "$OUTPUT_FILE" ]; then
+            cat "$OUTPUT_FILE"
+          fi
+          echo
+          echo "Copilot output ends"
+        } >> "$EXECUTION_LOG_FILE"
+
     - name: Full analysis
       if: ${{ always() }}
       shell: bash
       env:
-        COPILOT_OUTPUT_FILE: ${{ steps.runtime.outputs.copilot_output_file }}
+        COPILOT_OUTPUT_FILE: ${{ steps.runtime.outputs.copilot_execution_log_file }}
         COPILOT_ANSWER_FILE: ${{ inputs.copilot-answer-file }}
       run: |
         if [ -f "$COPILOT_OUTPUT_FILE" ]; then
@@ -324,6 +374,118 @@ runs:
           echo
           echo "$ACTION_LINK"
         } >> "$FINAL_COMMENT_FILE"
+
+    - name: Export action results
+      id: export_results
+      if: ${{ always() }}
+      shell: bash
+      env:
+        COMMENT_ID: ${{ steps.initial_comment.outputs.comment-id }}
+        GITHUB_SERVER_URL: ${{ github.server_url }}
+        ISSUE_NUMBER: ${{ steps.issue_number.outputs.issue_number }}
+        REPOSITORY: ${{ github.repository }}
+        ANALYSIS_PROMPT_FILE: ${{ steps.runtime.outputs.analysis_prompt_file }}
+        COPILOT_OUTPUT_FILE: ${{ steps.runtime.outputs.copilot_execution_log_file }}
+        COPILOT_OUTPUT_ARTIFACT_FILE: ${{ steps.runtime.outputs.copilot_output_artifact_file }}
+        COPILOT_ANSWER_FILE: ${{ inputs.copilot-answer-file }}
+        FINAL_CONCLUSION_ARTIFACT_FILE: ${{ steps.runtime.outputs.final_conclusion_artifact_file }}
+      run: |
+        python <<'PY'
+        import os
+        import uuid
+        from pathlib import Path
+
+        github_output = Path(os.environ["GITHUB_OUTPUT"])
+        comment_id = os.environ["COMMENT_ID"]
+        github_server_url = os.environ["GITHUB_SERVER_URL"]
+        issue_number = os.environ["ISSUE_NUMBER"]
+        repository = os.environ["REPOSITORY"]
+        analysis_prompt_file = Path(os.environ["ANALYSIS_PROMPT_FILE"])
+        copilot_output_file = Path(os.environ["COPILOT_OUTPUT_FILE"])
+        copilot_output_artifact_file = Path(os.environ["COPILOT_OUTPUT_ARTIFACT_FILE"])
+        copilot_answer_file = Path(os.environ["COPILOT_ANSWER_FILE"])
+        final_conclusion_artifact_file = Path(os.environ["FINAL_CONCLUSION_ARTIFACT_FILE"])
+        comment_url = (
+            f"{github_server_url}/{repository}/issues/{issue_number}#issuecomment-{comment_id}"
+            if comment_id
+            else ""
+        )
+
+        def read_or_placeholder(path: Path, missing_message: str) -> str:
+            if path.is_file():
+                return path.read_text(encoding="utf-8")
+            return f"{missing_message}\n"
+
+        def truncate_for_output(value: str, label: str, max_bytes: int = 300000) -> str:
+            encoded = value.encode("utf-8")
+            if len(encoded) <= max_bytes:
+                return value
+
+            suffix = (
+                f"\n\n[Truncated {label} for GitHub Actions output size limits. "
+                "Use the uploaded artifact for the full content.]\n"
+            )
+            suffix_bytes = suffix.encode("utf-8")
+            trimmed = encoded[: max_bytes - len(suffix_bytes)].decode("utf-8", errors="ignore")
+            return f"{trimmed}{suffix}"
+
+        copilot_output = read_or_placeholder(
+            copilot_output_file,
+            f"Copilot output file not found: {copilot_output_file}",
+        )
+        final_conclusion = read_or_placeholder(
+            copilot_answer_file,
+            f"Copilot answer file not found: {copilot_answer_file}",
+        )
+        analysis_prompt = read_or_placeholder(
+            analysis_prompt_file,
+            f"Analysis prompt file not found: {analysis_prompt_file}",
+        )
+
+        copilot_output_artifact_file.write_text(copilot_output, encoding="utf-8")
+        final_conclusion_artifact_file.write_text(final_conclusion, encoding="utf-8")
+
+        def write_multiline_output(name: str, value: str) -> None:
+            delimiter = f"EOF_{uuid.uuid4().hex}"
+            normalized_value = value if value.endswith("\n") else f"{value}\n"
+            with github_output.open("a", encoding="utf-8") as fh:
+                fh.write(f"{name}<<{delimiter}\n")
+                fh.write(normalized_value)
+                fh.write(f"{delimiter}\n")
+
+        with github_output.open("a", encoding="utf-8") as fh:
+            fh.write(f"comment-id={comment_id}\n")
+            fh.write(f"comment-url={comment_url}\n")
+
+        write_multiline_output(
+            "analysis-prompt",
+            truncate_for_output(analysis_prompt, "analysis-prompt"),
+        )
+        write_multiline_output(
+            "copilot-output",
+            truncate_for_output(copilot_output, "copilot-output"),
+        )
+        write_multiline_output(
+            "final-conclusion",
+            truncate_for_output(final_conclusion, "final-conclusion"),
+        )
+        PY
+
+    - name: Upload Copilot output artifact
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: copilot-output-issue-${{ steps.issue_number.outputs.issue_number }}-comment-${{ steps.initial_comment.outputs.comment-id || 'none' }}
+        path: ${{ steps.runtime.outputs.copilot_output_artifact_file }}
+        if-no-files-found: error
+
+    - name: Upload final conclusion artifact
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: final-conclusion-issue-${{ steps.issue_number.outputs.issue_number }}-comment-${{ steps.initial_comment.outputs.comment-id || 'none' }}
+        path: ${{ steps.runtime.outputs.final_conclusion_artifact_file }}
+        if-no-files-found: error
 
     - name: Update comment with analysis result
       if: ${{ always() && steps.initial_comment.outputs.comment-id != '' }}

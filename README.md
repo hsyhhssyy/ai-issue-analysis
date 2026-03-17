@@ -39,7 +39,8 @@ jobs:
       contents: read
       issues: write
     steps:
-      - uses: Misteo/ai-issue-analysis@main
+      - id: analysis
+        uses: Misteo/ai-issue-analysis@main
         with:
           github-token: ${{ secrets.PROJECT_BOT_TOKEN }}
           copilot-github-token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
@@ -50,6 +51,20 @@ jobs:
             把最终结论写到 {{copilot_answer_file}}。
           comment-prompt-template: |
             补充要求：{{comment_body}}
+
+      - name: Consume outputs
+        env:
+          ANALYSIS_PROMPT: ${{ steps.analysis.outputs.analysis-prompt }}
+          COMMENT_ID: ${{ steps.analysis.outputs.comment-id }}
+          COMMENT_URL: ${{ steps.analysis.outputs.comment-url }}
+          COPILOT_OUTPUT: ${{ steps.analysis.outputs.copilot-output }}
+          FINAL_CONCLUSION: ${{ steps.analysis.outputs.final-conclusion }}
+        run: |
+          printf '%s\n' "$ANALYSIS_PROMPT"
+          echo "comment_id=$COMMENT_ID"
+          echo "comment_url=$COMMENT_URL"
+          printf '%s\n' "$COPILOT_OUTPUT"
+          printf '%s\n' "$FINAL_CONCLUSION"
 ```
 
 `issue-number` input 通常可以不传：
@@ -74,6 +89,21 @@ jobs:
 - `stream-update-interval-seconds`: 流式更新评论的间隔秒数，默认 `30`
 - `checkout-repository`: 是否在 action 内部自动执行 `actions/checkout`，默认 `true`
 
+主要 outputs：
+
+- `issue-number`: 本次运行实际解析出的 Issue 编号
+- `comment-id`: 创建并持续更新的评论 ID
+- `comment-url`: 创建并持续更新的评论 URL
+- `analysis-prompt`: 本次最终传给 Copilot 的 prompt
+- `copilot-output`: 完整执行日志，包含 Copilot 启动前的参数打印、prompt 正文，以及 Copilot CLI 输出
+- `final-conclusion`: Copilot 写入 `copilot-answer-file` 的最终结论
+- `analysis-prompt`、`copilot-output` 和 `final-conclusion` 在过长时会为适配 GitHub Actions output 大小限制而被截断；完整内容优先从 artifacts 读取
+
+Artifacts：
+
+- `copilot-output-issue-<issue-number>-comment-<comment-id>`: 完整执行日志，包含启动前参数、prompt 正文和 Copilot CLI 输出
+- `final-conclusion-issue-<issue-number>-comment-<comment-id>`: 最终结论文本
+
 Skill 配合：
 
 - 这个 action 只负责 GitHub Actions 编排、评论更新、Copilot CLI 调用和 prompt 拼接，不内置项目领域知识
@@ -97,4 +127,7 @@ Skill 配合：
 - 如果调用方已经自己 checkout，或者前置步骤会生成工作区文件，可以把 `checkout-repository` 设为 `false`
 - 会自动安装 `@github/copilot`
 - 会先创建一条评论，然后持续更新这条评论
+- 会导出 `comment-id`、`comment-url`、`analysis-prompt`、`copilot-output`、`final-conclusion` 等 action outputs
+- `copilot-output` 会包含 Copilot 启动前的参数打印和 prompt 正文，不再只是 Copilot 进程本身的 stdout/stderr
+- 会上传 Copilot 原始输出和最终结论两个 artifacts
 - 最终评论会包含最终结论、完整分析过程折叠块，以及当前 Actions 运行链接

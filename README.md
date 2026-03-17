@@ -4,20 +4,30 @@
 
 ## 快速接入
 
-1. 请确保你有 Copilot Pro (当前仅支持 Copilot，以后可能适配 codex 等更多工具，欢迎 ISSUE 催更~）
+1. 请确保你有 Copilot Pro (当前仅支持 Copilot，以后可能适配 codex 等更多工具，欢迎 ISSUE 催更~)
 2. 前往 [GitHub PAT](https://github.com/settings/personal-access-tokens) 新增一个 token  
-  - Expiration(过期时间): 设为一年以内（太长反而会报错）
-  - Add Premissions(添加权限): 勾上所有 Copilot 相关的
-  - 点最下面绿色的 Generate，得到一个 token，复制下来保存好
-3. 在你的 GitHub 仓库 - Settings - secrets - actions - new repository secret, Name: `COPILOT_GITHUB_TOKEN`, Secret: 2 中生成的那个
-4. 把下面两个文件拷贝到你的仓库里，文件夹不要变  
-  - [`.github/workflows/ai-issue-analysis.yml`](.github/workflows/ai-issue-analysis.yml)
-  - [`.claude/skills/generic-issue-log-analysis/SKILL.md`](.claude/skills/generic-issue-log-analysis/SKILL.md)
-5. 自己提个 issue 测试下，或者在以前的 issue 里 `@github-actions`
+
+    - Expiration (过期时间): 设为一年以内（太长反而会报错）
+    - Add Premissions (添加权限): 勾上所有 Copilot 相关的
+    - 点最下面绿色的 Generate，得到一个 token，复制下来保存好
+
+3. 在你的 GitHub 仓库 - Settings - secrets - actions - new repository secret
+
+     - Name: `COPILOT_GITHUB_TOKEN`
+     - Secret: 上一步中生成的那个
+
+5. 把下面两个文件拷贝到你的仓库里，文件夹不要变
+
+    - [`.github/workflows/ai-issue-analysis.yml`](.github/workflows/ai-issue-analysis.yml)
+    - [`.claude/skills/generic-issue-log-analysis/SKILL.md`](.claude/skills/generic-issue-log-analysis/SKILL.md)
+
+6. 新提个 issue 测试下能否正常运行了，或者在以前的 issue 里 `@github-actions`
 
 > [!TIP]
 >
-> 如果你的项目有固定的日志包命名、关键日志路径、附件目录、模块映射或上游依赖，建议在这个通用版基础上微调 `SKILL.md`，分析质量会更高。
+> 如果你的项目有固定的日志包命名、关键日志路径、附件目录、模块映射或上游依赖，建议在这个通用版基础上微调 `SKILL.md`，分析质量会更高。最佳实践参考：
+> - [MaaEnd](https://github.com/MaaEnd/MaaEnd/blob/ci/prompt/.claude/skills/maaend-issue-log-analysis/SKILL.md)
+> - [MaaAssistantArknights](https://github.com/MaaAssistantArknights/MaaAssistantArknights/blob/dev-v2/.claude/skills/maa-issue-log-analysis/SKILL.md)
 
 ## 输入说明
 

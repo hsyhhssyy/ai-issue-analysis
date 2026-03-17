@@ -26,9 +26,6 @@ jobs:
       contents: read
       issues: write
     steps:
-      # 通用 sample，复制到目标仓库后通常至少需要替换：
-      # - secrets.COPILOT_GITHUB_TOKEN
-      #
       # 推荐配套：
       # - .claude/skills/generic-issue-log-analysis/SKILL.md
       - name: Analyze issue with AI

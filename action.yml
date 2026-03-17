@@ -35,7 +35,7 @@ inputs:
   prompt-template:
     description: Base prompt template. Supported placeholders are {{issue_number}}, {{copilot_answer_file}}, {{repository}}, and {{event_name}}.
     required: false
-    default: 分析 GitHub Issue #{{issue_number}}。把最终结论写到 {{copilot_answer_file}}。
+    default: 分析 GitHub Issue {{issue_number}}。把最终结论写到 {{copilot_answer_file}}。
   comment-prompt-template:
     description: Extra prompt appended when the triggering issue comment still has content after removing the bot mention. Supported placeholders also include {{comment_body}}.
     required: false

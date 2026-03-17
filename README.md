@@ -36,14 +36,12 @@
 
 ## 输入说明
 
-`issue-number` input 通常可以不传：
+- `issue-number`: Issue 编号，通常可以不传：
 
-- `issues` / `issue_comment` 事件会自动读取 `github.event.issue.number`
-- `workflow_dispatch` 会自动读取输入名为 `issue_number` 的 dispatch 参数
-
-如果你的 workflow_dispatch 输入名不是 `issue_number`，或者你在其他事件里调用这个 action，就显式传 `issue-number`。
-
-主要 inputs：
+    - `issues` / `issue_comment` 事件会自动读取 `github.event.issue.number`
+    - `workflow_dispatch` 会自动读取输入名为 `issue_number` 的 dispatch 参数
+    
+    如果你的 workflow_dispatch 输入名不是 `issue_number`，或者你在其他事件里调用这个 action，就显式传 `issue-number`。
 
 - `github-token`: 用于创建和更新 Issue 评论
 - `copilot-github-token`: Copilot CLI 使用的 Fine-grained token

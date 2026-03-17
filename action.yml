@@ -1,5 +1,6 @@
 name: AI Issue Analysis
 description: Analyze a GitHub issue with Copilot CLI and keep a comment updated with progress and the final result.
+author: MistEO
 
 inputs:
   issue-number:
@@ -20,7 +21,8 @@ inputs:
     description: Initial comment body shown before the analysis finishes.
     required: false
     default: |
-      🤖 **AI 正在分析该 Issue...**
+      🤖 **AI 正在分析该 Issue...**  
+      
       感谢您的反馈！AI 正在自动分析该问题，预计耗时约 10 分钟。
   action-link-text:
     description: Link text shown for the current GitHub Actions run.

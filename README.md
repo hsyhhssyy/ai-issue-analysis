@@ -44,7 +44,7 @@
     如果你的 workflow_dispatch 输入名不是 `issue_number`，或者你在其他事件里调用这个 action，就显式传 `issue-number`。
 
 - `github-token`: 用于创建和更新 Issue 评论
-- `copilot-github-token`: Copilot CLI 使用的 Fine-grained token
+- `copilot-github-token`: Copilot CLI 使用的 Fine-grained token，支持传多个 token，每行一个，action 会随机选择一个使用
 - `bot-name`: 从 `issue_comment` 正文中剥离掉的 bot mention，比如 `@YourBot`
 - `initial-comment-body`: 开始分析时先发出的评论正文
 - `action-link-text`: 评论里展示的运行链接文字
@@ -98,4 +98,5 @@
 - `copilot-output` 会包含 Copilot 启动前的参数打印和 prompt 正文，不再只是 Copilot 进程本身的 stdout/stderr
 - 会上传 Copilot 原始输出和最终结论两个 artifacts
 - 最终评论会包含最终结论、完整分析过程折叠块，以及当前 Actions 运行链接
+- `copilot-github-token` 兼容单个 token，也兼容多个 token 按行填写；传多个时每次运行会随机选一个
 

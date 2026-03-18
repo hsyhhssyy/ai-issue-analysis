@@ -11,7 +11,7 @@ inputs:
     description: GitHub token used to create and update issue comments.
     required: true
   copilot-github-token:
-    description: Fine-grained GitHub token with Copilot access for the Copilot CLI.
+    description: Fine-grained GitHub token with Copilot access for the Copilot CLI. Supports multiple tokens, one per line, and randomly picks one.
     required: true
   bot-name:
     description: Bot mention to strip from issue_comment messages before appending extra requirements.
@@ -223,10 +223,33 @@ runs:
       shell: bash
       run: npm install -g "${{ inputs.copilot-package }}"
 
+    - name: Resolve Copilot token
+      id: resolve_copilot_token
+      shell: bash
+      env:
+        INPUT_COPILOT_GITHUB_TOKEN: ${{ inputs.copilot-github-token }}
+      run: |
+        python <<'PY'
+        import os
+        import secrets
+
+        raw_value = os.environ["INPUT_COPILOT_GITHUB_TOKEN"]
+        tokens = [line.strip() for line in raw_value.splitlines() if line.strip()]
+
+        if not tokens:
+            raise SystemExit("Input copilot-github-token is empty after trimming blank lines.")
+
+        selected_token = secrets.choice(tokens)
+
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+            fh.write(f"copilot_token={selected_token}\n")
+            fh.write(f"copilot_token_count={len(tokens)}\n")
+        PY
+
     - name: Run Copilot analysis with streaming updates
       shell: bash
       env:
-        COPILOT_GITHUB_TOKEN: ${{ inputs.copilot-github-token }}
+        COPILOT_GITHUB_TOKEN: ${{ steps.resolve_copilot_token.outputs.copilot_token }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
         GITHUB_SERVER_URL: ${{ github.server_url }}
         COMMENT_ID: ${{ steps.initial_comment.outputs.comment-id }}
@@ -256,6 +279,7 @@ runs:
           echo "  comment-url: $COMMENT_URL"
           echo "  model: $COPILOT_MODEL"
           echo "  reasoning-effort: $COPILOT_REASONING_EFFORT"
+          echo "  copilot-token-count: ${{ steps.resolve_copilot_token.outputs.copilot_token_count }}"
           echo "  stream-update-interval-seconds: $STREAM_UPDATE_INTERVAL"
           echo "  analysis-prompt-file: $ANALYSIS_PROMPT_FILE"
           echo "  output-file: $OUTPUT_FILE"

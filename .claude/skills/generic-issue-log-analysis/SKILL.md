@@ -237,12 +237,16 @@ description: 分析当前仓库或用户明确指定的公开 GitHub issue（完
 
 ## 关键证据
 
+<details><summary>点击此处展开</summary>
+
 - issue 正文 / 评论：
 - 运行时日志：
 - UI / 服务日志：
 - 配置快照：
 - 现场图 / 转储：
 - 代码依据：如需指向具体实现，直接附远端 GitHub 行号链接
+
+</details>
 
 ## 根因判断
 
@@ -264,6 +268,8 @@ description: 分析当前仓库或用户明确指定的公开 GitHub issue（完
 
 ## 给 AI 的建议（可复制）
 
+<details><summary>点击此处展开</summary>
+
 ~~~text
 已确认事实：
 - ...
@@ -278,6 +284,8 @@ description: 分析当前仓库或用户明确指定的公开 GitHub issue（完
 4. 回归验证：...
 5. 如果暂时无法彻底修复，至少补上：...
 ~~~
+
+</details>
 
 ## 置信度
 

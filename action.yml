@@ -68,6 +68,10 @@ inputs:
     description: Whether to run actions/checkout inside the action before analysis.
     required: false
     default: "true"
+  extra-comment-content:
+    description: Extra content always appended at the bottom of every comment update. Empty by default.
+    required: false
+    default: ""
 
 outputs:
   issue-number:
@@ -266,6 +270,7 @@ runs:
         COPILOT_MODEL: ${{ inputs.copilot-model }}
         COPILOT_REASONING_EFFORT: ${{ inputs.copilot-reasoning-effort }}
         STREAM_UPDATE_INTERVAL: ${{ inputs.stream-update-interval-seconds }}
+        EXTRA_COMMENT_CONTENT: ${{ inputs.extra-comment-content }}
       run: |
         COMMENT_URL="$GITHUB_SERVER_URL/$REPO/issues/$ISSUE_NUMBER#issuecomment-$COMMENT_ID"
 
@@ -321,6 +326,10 @@ runs:
                 echo "$DETAILS_END"
                 echo
                 echo "$ACTION_LINK"
+                if [ -n "$EXTRA_COMMENT_CONTENT" ]; then
+                  echo
+                  echo "$EXTRA_COMMENT_CONTENT"
+                fi
               } > "$BODY_FILE"
 
               jq -n --arg body "$(cat "$BODY_FILE")" '{"body":$body}' | \
@@ -377,6 +386,7 @@ runs:
         ACTION_LINK: ${{ steps.runtime.outputs.action_link }}
         DETAILS_BEGIN: ${{ steps.runtime.outputs.details_begin }}
         DETAILS_END: ${{ steps.runtime.outputs.details_end }}
+        EXTRA_COMMENT_CONTENT: ${{ inputs.extra-comment-content }}
       run: |
         : > "$FINAL_COMMENT_FILE"
 
@@ -397,6 +407,10 @@ runs:
           echo "$DETAILS_END"
           echo
           echo "$ACTION_LINK"
+          if [ -n "$EXTRA_COMMENT_CONTENT" ]; then
+            echo
+            echo "$EXTRA_COMMENT_CONTENT"
+          fi
         } >> "$FINAL_COMMENT_FILE"
 
     - name: Export action results

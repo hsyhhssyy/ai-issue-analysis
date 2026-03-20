@@ -55,6 +55,7 @@
 - `copilot-reasoning-effort`: 默认 `xhigh`
 - `stream-update-interval-seconds`: 流式更新评论的间隔秒数，默认 `30`
 - `checkout-repository`: 是否在 action 内部自动执行 `actions/checkout`，默认 `true`
+- `extra-comment-content`: 始终追加在每次评论最末尾的额外内容，默认为空
 
 ## 输出说明
 

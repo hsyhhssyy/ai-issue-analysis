@@ -68,6 +68,14 @@ inputs:
     description: Whether to run actions/checkout inside the action before analysis.
     required: false
     default: "true"
+  process-error-message:
+    description: Fallback message shown in the full analysis log when the Copilot answer file is not found.
+    required: false
+    default: 分析过程出现错误，请重试。
+  result-error-message:
+    description: Fallback message written into the final issue comment when the Copilot answer file is not found.
+    required: false
+    default: 分析结果出现错误，请重试。
   extra-comment-content:
     description: Extra content always appended at the bottom of every comment update. Empty by default.
     required: false
@@ -363,6 +371,7 @@ runs:
       env:
         COPILOT_OUTPUT_FILE: ${{ steps.runtime.outputs.copilot_execution_log_file }}
         COPILOT_ANSWER_FILE: ${{ inputs.copilot-answer-file }}
+        PROCESS_ERROR_MESSAGE: ${{ inputs.process-error-message }}
       run: |
         if [ -f "$COPILOT_OUTPUT_FILE" ]; then
           cat "$COPILOT_OUTPUT_FILE"
@@ -373,7 +382,7 @@ runs:
         if [ -f "$COPILOT_ANSWER_FILE" ]; then
           cat "$COPILOT_ANSWER_FILE"
         else
-          echo "Copilot answer file not found: $COPILOT_ANSWER_FILE"
+          echo "$PROCESS_ERROR_MESSAGE"
         fi
 
     - name: Prepare final comment
@@ -387,13 +396,14 @@ runs:
         DETAILS_BEGIN: ${{ steps.runtime.outputs.details_begin }}
         DETAILS_END: ${{ steps.runtime.outputs.details_end }}
         EXTRA_COMMENT_CONTENT: ${{ inputs.extra-comment-content }}
+        RESULT_ERROR_MESSAGE: ${{ inputs.result-error-message }}
       run: |
         : > "$FINAL_COMMENT_FILE"
 
         if [ -f "$COPILOT_ANSWER_FILE" ]; then
           cat "$COPILOT_ANSWER_FILE" >> "$FINAL_COMMENT_FILE"
         else
-          echo "Copilot did not produce a final answer file: $COPILOT_ANSWER_FILE" >> "$FINAL_COMMENT_FILE"
+          echo "$RESULT_ERROR_MESSAGE" >> "$FINAL_COMMENT_FILE"
         fi
 
         {

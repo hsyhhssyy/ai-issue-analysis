@@ -330,7 +330,11 @@ runs:
                 echo "---"
                 echo
                 echo "$DETAILS_BEGIN"
+                echo
+                echo '```text'
                 echo "$current_content"
+                echo '```'
+                echo
                 echo "$DETAILS_END"
                 echo
                 echo "$ACTION_LINK"
@@ -411,9 +415,13 @@ runs:
           echo "---"
           echo
           echo "$DETAILS_BEGIN"
+          echo
+          echo '```text'
           if [ -f "$COPILOT_OUTPUT_FILE" ]; then
             cat "$COPILOT_OUTPUT_FILE"
           fi
+          echo '```'
+          echo
           echo "$DETAILS_END"
           echo
           echo "$ACTION_LINK"

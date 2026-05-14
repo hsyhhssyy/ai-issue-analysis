@@ -40,6 +40,7 @@ jobs:
         id: analysis
         uses: Misteo/ai-issue-analysis@main
         with:
+          llm-config-json: ${{ vars.LLM_CONFIG }}
           bot-name: "@github-actions"
           github-token: ${{ secrets.GITHUB_TOKEN }}
 

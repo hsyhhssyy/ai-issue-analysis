@@ -1,5 +1,5 @@
 name: AI Issue Analysis
-description: Analyze a GitHub issue with Copilot CLI and keep a comment updated with progress and the final result.
+description: Analyze a GitHub issue with AI and keep a comment updated with progress and the final result.
 author: MistEO
 
 inputs:
@@ -11,8 +11,9 @@ inputs:
     description: GitHub token used to create and update issue comments.
     required: true
   copilot-github-token:
-    description: Fine-grained GitHub token with Copilot access for the Copilot CLI. Supports multiple tokens, one per line, and randomly picks one.
-    required: true
+    description: Legacy fine-grained GitHub token with Copilot access for the Copilot CLI fallback path. Supports multiple tokens, one per line, and randomly picks one.
+    required: false
+    default: ""
   bot-name:
     description: Bot mention to strip from issue_comment messages before appending extra requirements.
     required: false
@@ -40,12 +41,24 @@ inputs:
     description: Extra prompt appended when the triggering issue comment still has content after removing the bot mention. Supported placeholders also include {{comment_body}}.
     required: false
     default: 补充要求：{{comment_body}}
+  llm-config-json:
+    description: JSON object or array describing the LiteLLM model config. Supports fields such as provider, model, api_key, api_base or base_url, reasoning_effort, headers, and litellm_params.
+    required: false
+    default: ""
+  litellm-package:
+    description: Python package spec used to install LiteLLM for the llm-config-json path.
+    required: false
+    default: litellm
+  analysis-max-iterations:
+    description: Maximum tool-calling iterations for the LiteLLM analysis runner.
+    required: false
+    default: "12"
   copilot-model:
-    description: Copilot CLI model name.
+    description: Legacy Copilot CLI model name for the fallback path.
     required: false
     default: gpt-5.4
   copilot-reasoning-effort:
-    description: Copilot CLI reasoning effort.
+    description: Legacy Copilot CLI reasoning effort for the fallback path.
     required: false
     default: xhigh
   stream-update-interval-seconds:
@@ -61,7 +74,7 @@ inputs:
     required: false
     default: copilot_answer.md
   copilot-package:
-    description: NPM package to install for the Copilot CLI.
+    description: NPM package to install for the legacy Copilot CLI fallback path.
     required: false
     default: "@github/copilot"
   checkout-repository:
@@ -115,7 +128,7 @@ runs:
         INPUT_ISSUE_NUMBER: ${{ inputs.issue-number }}
         EVENT_NAME: ${{ github.event_name }}
       run: |
-        python <<'PY'
+        python3 <<'PY'
         import json
         import os
         from pathlib import Path
@@ -155,6 +168,8 @@ runs:
           echo "comment_body_file=$CACHE_DIR/comment_body.txt"
           echo "final_comment_file=$CACHE_DIR/final_comment.md"
           echo "final_conclusion_artifact_file=$CACHE_DIR/final_conclusion.md"
+          echo "litellm_venv_dir=$CACHE_DIR/litellm-venv"
+          echo "litellm_python=$CACHE_DIR/litellm-venv/bin/python"
           echo "details_end=</details>"
           echo "action_link<<EOF"
           echo "🔗 [$ACTION_LINK_TEXT](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
@@ -176,7 +191,7 @@ runs:
         COMMENT_PROMPT_TEMPLATE: ${{ inputs.comment-prompt-template }}
         REPOSITORY: ${{ github.repository }}
       run: |
-        python <<'PY'
+        python3 <<'PY'
         import json
         import os
         import re
@@ -231,17 +246,57 @@ runs:
           ---
           ${{ steps.runtime.outputs.action_link }}
 
+    - name: Decide analysis path
+      id: decide_path
+      shell: bash
+      env:
+        LLM_CONFIG_INPUT: ${{ inputs.llm-config-json }}
+        LLM_CONFIG_VARS: ${{ vars.LLM_CONFIG }}
+      run: |
+        if [ -n "$LLM_CONFIG_INPUT" ] || [ -n "$LLM_CONFIG_VARS" ]; then
+          echo "use_litellm=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "use_litellm=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Resolve LLM config
+      id: resolve_llm_config
+      if: ${{ steps.decide_path.outputs.use_litellm == 'true' }}
+      shell: bash
+      env:
+        LLM_CONFIG_INPUT: ${{ inputs.llm-config-json }}
+        LLM_CONFIG_VARS: ${{ vars.LLM_CONFIG }}
+      run: |
+        CONFIG="$LLM_CONFIG_INPUT"
+        if [ -z "$CONFIG" ]; then
+          CONFIG="$LLM_CONFIG_VARS"
+        fi
+        echo "llm_config=$CONFIG" >> "$GITHUB_OUTPUT"
+
+    - name: Install LiteLLM
+      if: ${{ steps.decide_path.outputs.use_litellm == 'true' }}
+      shell: bash
+      env:
+        LITELLM_VENV_DIR: ${{ steps.runtime.outputs.litellm_venv_dir }}
+        LITELLM_PYTHON: ${{ steps.runtime.outputs.litellm_python }}
+      run: |
+        python3 -m venv "$LITELLM_VENV_DIR"
+        "$LITELLM_PYTHON" -m pip install --disable-pip-version-check --quiet --upgrade pip
+        "$LITELLM_PYTHON" -m pip install --disable-pip-version-check --quiet "${{ inputs.litellm-package }}"
+
     - name: Install Copilot CLI
+      if: ${{ steps.decide_path.outputs.use_litellm != 'true' }}
       shell: bash
       run: npm install -g "${{ inputs.copilot-package }}"
 
     - name: Resolve Copilot token
+      if: ${{ steps.decide_path.outputs.use_litellm != 'true' }}
       id: resolve_copilot_token
       shell: bash
       env:
         INPUT_COPILOT_GITHUB_TOKEN: ${{ inputs.copilot-github-token }}
       run: |
-        python <<'PY'
+        python3 <<'PY'
         import os
         import secrets
 
@@ -258,7 +313,131 @@ runs:
             fh.write(f"copilot_token_count={len(tokens)}\n")
         PY
 
+    - name: Run LiteLLM analysis with streaming updates
+      if: ${{ steps.decide_path.outputs.use_litellm == 'true' }}
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GITHUB_SERVER_URL: ${{ github.server_url }}
+        COMMENT_ID: ${{ steps.initial_comment.outputs.comment-id }}
+        ISSUE_NUMBER: ${{ steps.issue_number.outputs.issue_number }}
+        REPO: ${{ github.repository }}
+        ANALYSIS_PROMPT_FILE: ${{ steps.runtime.outputs.analysis_prompt_file }}
+        OUTPUT_FILE: ${{ steps.runtime.outputs.copilot_output_file }}
+        EXECUTION_LOG_FILE: ${{ steps.runtime.outputs.copilot_execution_log_file }}
+        BODY_FILE: ${{ steps.runtime.outputs.comment_body_file }}
+        INITIAL_BODY: ${{ inputs.initial-comment-body }}
+        ACTION_LINK: ${{ steps.runtime.outputs.action_link }}
+        DETAILS_BEGIN: ${{ steps.runtime.outputs.details_begin }}
+        DETAILS_END: ${{ steps.runtime.outputs.details_end }}
+        STREAM_UPDATE_INTERVAL: ${{ inputs.stream-update-interval-seconds }}
+        EXTRA_COMMENT_CONTENT: ${{ inputs.extra-comment-content }}
+        LLM_CONFIG_JSON: ${{ steps.resolve_llm_config.outputs.llm_config }}
+        ANALYSIS_MAX_ITERATIONS: ${{ inputs.analysis-max-iterations }}
+        COPILOT_ANSWER_FILE: ${{ inputs.copilot-answer-file }}
+        LITELLM_PYTHON: ${{ steps.runtime.outputs.litellm_python }}
+        LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      run: |
+        COMMENT_URL="$GITHUB_SERVER_URL/$REPO/issues/$ISSUE_NUMBER#issuecomment-$COMMENT_ID"
+
+        : > "$OUTPUT_FILE"
+        : > "$EXECUTION_LOG_FILE"
+        {
+          echo "LiteLLM invocation parameters:"
+          echo "  repo: $REPO"
+          echo "  issue-number: $ISSUE_NUMBER"
+          echo "  comment-id: $COMMENT_ID"
+          echo "  comment-url: $COMMENT_URL"
+          echo "  llm-config-json-length: $(printf '%s' "$LLM_CONFIG_JSON" | wc -c)"
+          echo "  max-iterations: $ANALYSIS_MAX_ITERATIONS"
+          echo "  stream-update-interval-seconds: $STREAM_UPDATE_INTERVAL"
+          echo "  analysis-prompt-file: $ANALYSIS_PROMPT_FILE"
+          echo "  output-file: $OUTPUT_FILE"
+          echo "  body-file: $BODY_FILE"
+          echo "  answer-file: $COPILOT_ANSWER_FILE"
+          echo "  litellm-python: $LITELLM_PYTHON"
+          echo "  command: $LITELLM_PYTHON scripts/run_litellm_analysis.py --llm-config-json '<redacted>' --analysis-prompt-file \"$ANALYSIS_PROMPT_FILE\" --answer-file \"$COPILOT_ANSWER_FILE\" --repo \"$REPO\" --issue-number \"$ISSUE_NUMBER\" --github-token '<redacted>' --max-iterations \"$ANALYSIS_MAX_ITERATIONS\""
+          echo "Prompt content begins"
+          cat "$ANALYSIS_PROMPT_FILE"
+          echo "Prompt content ends"
+        } | tee -a "$EXECUTION_LOG_FILE"
+
+        "$LITELLM_PYTHON" scripts/run_litellm_analysis.py \
+          --llm-config-json "$LLM_CONFIG_JSON" \
+          --analysis-prompt-file "$ANALYSIS_PROMPT_FILE" \
+          --answer-file "$COPILOT_ANSWER_FILE" \
+          --repo "$REPO" \
+          --issue-number "$ISSUE_NUMBER" \
+          --github-token "$GITHUB_TOKEN" \
+          --max-iterations "$ANALYSIS_MAX_ITERATIONS" > "$OUTPUT_FILE" 2>&1 &
+        ANALYSIS_PID=$!
+        echo "LiteLLM analysis started with PID $ANALYSIS_PID" | tee -a "$EXECUTION_LOG_FILE"
+
+        last_content=""
+
+        while true; do
+          sleep "$STREAM_UPDATE_INTERVAL" &
+          sleep_pid=$!
+
+          wait -n "$ANALYSIS_PID" "$sleep_pid" 2>/dev/null || true
+
+          if ! kill -0 "$ANALYSIS_PID" 2>/dev/null; then
+            kill "$sleep_pid" 2>/dev/null || true
+            break
+          fi
+
+          if [ -f "$OUTPUT_FILE" ]; then
+            current_content=$(cat "$OUTPUT_FILE")
+            if [ "$current_content" != "$last_content" ] && [ -n "$current_content" ]; then
+              {
+                echo "$INITIAL_BODY"
+                echo
+                echo "---"
+                echo
+                echo "$DETAILS_BEGIN"
+                echo
+                echo '```text'
+                echo "$current_content"
+                echo '```'
+                echo
+                echo "$DETAILS_END"
+                echo
+                echo "$ACTION_LINK"
+                if [ -n "$EXTRA_COMMENT_CONTENT" ]; then
+                  echo
+                  echo "$EXTRA_COMMENT_CONTENT"
+                fi
+              } > "$BODY_FILE"
+
+              jq -n --arg body "$(cat "$BODY_FILE")" '{"body":$body}' | \
+                curl -s -L -X PATCH \
+                  -H "Authorization: token $GITHUB_TOKEN" \
+                  -H "Accept: application/vnd.github.v3+json" \
+                  "https://api.github.com/repos/$REPO/issues/comments/$COMMENT_ID" \
+                  -d @-
+
+              last_content="$current_content"
+              echo "Comment updated at $(date)"
+            fi
+          fi
+        done
+
+        wait "$ANALYSIS_PID"
+
+        {
+          echo
+          echo "Analysis output begins"
+          if [ -f "$OUTPUT_FILE" ]; then
+            cat "$OUTPUT_FILE"
+          fi
+          echo
+          echo "Analysis output ends"
+        } >> "$EXECUTION_LOG_FILE"
+
     - name: Run Copilot analysis with streaming updates
+      if: ${{ steps.decide_path.outputs.use_litellm != 'true' }}
       shell: bash
       env:
         COPILOT_GITHUB_TOKEN: ${{ steps.resolve_copilot_token.outputs.copilot_token }}
@@ -446,7 +625,7 @@ runs:
         COPILOT_ANSWER_FILE: ${{ inputs.copilot-answer-file }}
         FINAL_CONCLUSION_ARTIFACT_FILE: ${{ steps.runtime.outputs.final_conclusion_artifact_file }}
       run: |
-        python <<'PY'
+        python3 <<'PY'
         import os
         import uuid
         from pathlib import Path

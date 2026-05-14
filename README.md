@@ -1,6 +1,11 @@
 # ai-issue-analysis
 
-一个通用的 GitHub composite action，用来在 Issue 打开或被评论时调用 Copilot CLI 做分析，并把分析过程和最终结论持续回写到同一条评论里。
+一个通用的 GitHub composite action，用来在 Issue 打开或被评论时调用 AI 模型做分析，并把分析过程和最终结论持续回写到同一条评论里。
+
+支持两种 AI 驱动方式：
+
+- **LiteLLM 路径**（推荐新接入用）：通过 JSON 配置接入 DeepSeek、OpenAI 兼容接口、GitHub Models 等 100+ 模型提供方。
+- **Copilot CLI 路径**（兼容回退）：继续使用 `@github/copilot` CLI，适用于已有 Copilot token 的用户。
 
 实战效果展示：
 
@@ -9,7 +14,58 @@
 
 ## 快速接入
 
-1. 请确保你有 Copilot Pro (当前仅支持 Copilot，以后可能适配 codex 等更多工具，欢迎 ISSUE 催更~)
+### 方式一：LiteLLM（DeepSeek / OpenAI 兼容 / 100+ 模型）
+
+1. 准备 API Key。以 DeepSeek 为例，前往 [DeepSeek Platform](https://platform.deepseek.com/api_keys) 创建 API Key。
+
+2. 在你的 GitHub 仓库里配置两个变量（Settings → Secrets and variables → Actions）：
+
+    **Secrets 标签页** — 存放密钥：
+
+     - Name: `DEEPSEEK_API_KEY`
+     - Secret: 上一步中生成的 API Key
+
+    **Variables 标签页** — 存放模型配置（不含密钥）：
+
+     - Name: `LLM_CONFIG`
+     - Value: 下面的 JSON（密钥部分用 `${DEEPSEEK_API_KEY}` 占位）：
+       ```json
+       {
+         "provider": "deepseek",
+         "model": "deepseek-chat",
+         "api_key": "${DEEPSEEK_API_KEY}",
+         "reasoning_effort": "xhigh",
+         "max_output_tokens": 32000
+       }
+       ```
+
+3. 把下面两个文件拷贝到你的仓库里，文件夹不要变
+
+    - [`.github/workflows/ai-issue-analysis.yml`](.github/workflows/ai-issue-analysis.yml)
+    - [`.claude/skills/generic-issue-log-analysis/SKILL.md`](.claude/skills/generic-issue-log-analysis/SKILL.md)
+
+4. Action 会自动检测仓库 Variable `LLM_CONFIG`。你的 workflow 只需最简配置，无需传任何模型参数：
+
+    ```yaml
+    steps:
+      - name: Analyze issue with AI
+        uses: Misteo/ai-issue-analysis@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          bot-name: "@github-actions"
+    ```
+
+    > 想换模型、调参数？去 GitHub Settings 改 `LLM_CONFIG` Variable 即可，workflow 文件终身不用动。
+    >
+    > Action 会自动将 `LLM_API_KEY`、`DEEPSEEK_API_KEY`、`OPENAI_API_KEY` 这三个 Secret 暴露为环境变量，供 `${VAR_NAME}` 占位符展开。
+    >
+    > `provider` 可设为 `deepseek`（走 LiteLLM 官方 DeepSeek provider）、`openai-compatible`（走通用 OpenAI 兼容端点，需要同时传 `base_url`）、`openai`、`github` 等。完整列表见 [LiteLLM Providers](https://docs.litellm.ai/docs/providers)。
+
+5. 新提个 issue 测试下能否正常运行了，或者在以前的 issue 里 `@github-actions`。
+
+### 方式二：Copilot CLI（兼容回退）
+
+1. 请确保你有 Copilot Pro
 2. 前往 [GitHub PAT](https://github.com/settings/personal-access-tokens) 新增一个 token  
 
     - Expiration (过期时间): 设为一年以内（太长反而会报错）
@@ -21,12 +77,9 @@
      - Name: `COPILOT_GITHUB_TOKEN`
      - Secret: 上一步中生成的那个
 
-5. 把下面两个文件拷贝到你的仓库里，文件夹不要变
+4. 拷贝 `.github/workflows/ai-issue-analysis.yml` 和 `.claude/skills/generic-issue-log-analysis/SKILL.md` 到你的仓库。
 
-    - [`.github/workflows/ai-issue-analysis.yml`](.github/workflows/ai-issue-analysis.yml)
-    - [`.claude/skills/generic-issue-log-analysis/SKILL.md`](.claude/skills/generic-issue-log-analysis/SKILL.md)
-
-6. 新提个 issue 测试下能否正常运行了，或者在以前的 issue 里 `@github-actions`
+5. 新提个 issue 测试下能否正常运行了，或者在以前的 issue 里 `@github-actions`
 
 > [!TIP]
 >
@@ -44,15 +97,18 @@
     如果你的 workflow_dispatch 输入名不是 `issue_number`，或者你在其他事件里调用这个 action，就显式传 `issue-number`。
 
 - `github-token`: 用于创建和更新 Issue 评论
-- `copilot-github-token`: Copilot CLI 使用的 Fine-grained token，支持传多个 token，每行一个，action 会随机选择一个使用
+- `copilot-github-token`: （方式二）Copilot CLI 使用的 Fine-grained token。仅在未配置 `LLM_CONFIG` Variable 且未传 `llm-config-json` 时才会用到。支持多 token 逐行填写，随机选用
+- `llm-config-json`: （方式一）JSON 对象或数组，描述 LiteLLM 模型配置。支持字段：`provider`、`model`、`api_key`、`api_base` 或 `base_url`、`reasoning_effort`、`max_output_tokens`、`temperature`、`headers`、`litellm_params` 等。字符串值中 `${VAR_NAME}` 会自动展开为同名环境变量，方便把密钥放进 Secret、配置放进 Variable。传数组时每次运行随机选一个
+- `litellm-package`: （方式一）安装 LiteLLM 用的 Python 包名，默认 `litellm`
+- `analysis-max-iterations`: （方式一）工具调用最大轮次，默认 `12`
 - `bot-name`: 从 `issue_comment` 正文中剥离掉的 bot mention，比如 `@YourBot`
 - `initial-comment-body`: 开始分析时先发出的评论正文
 - `action-link-text`: 评论里展示的运行链接文字
 - `details-summary`: 分析过程折叠块的标题
 - `prompt-template`: 基础分析提示词模板
 - `comment-prompt-template`: 有评论补充要求时追加的提示词模板
-- `copilot-model`: 默认 `gpt-5.4`
-- `copilot-reasoning-effort`: 默认 `xhigh`
+- `copilot-model`: （方式二）Copilot CLI 模型名，默认 `gpt-5.4`
+- `copilot-reasoning-effort`: （方式二）Copilot CLI reasoning effort，默认 `xhigh`
 - `stream-update-interval-seconds`: 流式更新评论的间隔秒数，默认 `30`
 - `checkout-repository`: 是否在 action 内部自动执行 `actions/checkout`，默认 `true`
 - `extra-comment-content`: 始终追加在每次评论最末尾的额外内容，默认为空
@@ -74,7 +130,7 @@
 
 ## Skill 配合
 
-- 这个 action 只负责 GitHub Actions 编排、评论更新、Copilot CLI 调用和 prompt 拼接，不内置项目领域知识
+- 这个 action 只负责 GitHub Actions 编排、评论更新、AI 调用和 prompt 拼接，不内置项目领域知识
 - 对需要分析 issue 附件、日志包、运行时配置、跨仓库代码路径的项目，建议配套提供项目自己的 issue 分析 skill
 - 一个可行的 skill 一般至少会覆盖这些步骤：读取 issue 正文和评论、定位并下载日志附件、先建立时间线再筛证据、最后回溯到代码和文档做归因
 - 如果没有这层 skill，action 仍然能运行，但对日志包、截图、跨模块调用链这类问题，分析质量通常会明显下降
@@ -93,11 +149,25 @@
 
 - action 内部会自动 `checkout` 调用方仓库
 - 如果调用方已经自己 checkout，或者前置步骤会生成工作区文件，可以把 `checkout-repository` 设为 `false`
+
+**当传入 `llm-config-json` 时（方式一 / LiteLLM 路径）：**
+
+- action 会在自有 venv 里安装 LiteLLM，不污染系统 Python
+- 新运行器会拉取当前 issue 与评论，提供仓库读取、代码搜索、目录浏览、附件下载、压缩包解压等工具给模型调用
+- 配置中 `${VAR_NAME}` 会自动展开为同名环境变量，可将密钥存 Secret、模型配置存 Variable，workflow 一次配好不再改
+- 分析完成后将最终结论写入答案文件，并流式更新评论
+- 分析日志会包含 LiteLLM 调用参数和完整 prompt
+
+**未传 `llm-config-json` 时（方式二 / Copilot CLI 回退）：**
+
 - 会自动安装 `@github/copilot`
+- `copilot-github-token` 兼容单个 token，也兼容多个 token 按行填写；传多个时每次运行会随机选一个
+
+**两种路径共用行为：**
+
 - 会先创建一条评论，然后持续更新这条评论
 - 会导出 `comment-id`、`comment-url`、`analysis-prompt`、`copilot-output`、`final-conclusion` 等 action outputs
-- `copilot-output` 会包含 Copilot 启动前的参数打印和 prompt 正文，不再只是 Copilot 进程本身的 stdout/stderr
-- 会上传 Copilot 原始输出和最终结论两个 artifacts
+- `copilot-output` 会包含 AI 启动前的参数打印和 prompt 正文
+- 会上传原始输出和最终结论两个 artifacts
 - 最终评论会包含最终结论、完整分析过程折叠块，以及当前 Actions 运行链接
-- `copilot-github-token` 兼容单个 token，也兼容多个 token 按行填写；传多个时每次运行会随机选一个
 

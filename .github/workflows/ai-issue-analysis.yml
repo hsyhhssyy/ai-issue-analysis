@@ -26,6 +26,9 @@ jobs:
       contents: read
       issues: write
     steps:
+      - name: Checkout current repository
+        uses: actions/checkout@v4
+
       # 推荐配套：
       # - .claude/skills/generic-issue-log-analysis/SKILL.md
       #
@@ -38,8 +41,9 @@ jobs:
       # ═══════════════════════════════════════════════════════════════
       - name: Analyze issue with AI
         id: analysis
-        uses: Misteo/ai-issue-analysis@main
+        uses: ./
         with:
+          checkout-repository: "false"
           llm-config-json: ${{ vars.LLM_CONFIG }}
           bot-name: "@github-actions"
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -52,7 +56,7 @@ jobs:
       # ═══════════════════════════════════════════════════════════════
       # - name: Analyze issue with AI
       #   id: analysis
-      #   uses: Misteo/ai-issue-analysis@main
+      #   uses: ./
       #   with:
       #     copilot-github-token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
       #     bot-name: "@github-actions"

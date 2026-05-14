@@ -253,6 +253,14 @@ runs:
         LLM_CONFIG_INPUT: ${{ inputs.llm-config-json }}
         LLM_CONFIG_VARS: ${{ vars.LLM_CONFIG }}
       run: |
+        echo "::group::LLM config detection"
+        echo "LLM_CONFIG_INPUT length: ${#LLM_CONFIG_INPUT}"
+        echo "LLM_CONFIG_VARS length: ${#LLM_CONFIG_VARS}"
+        if [ -n "$LLM_CONFIG_VARS" ]; then
+          echo "LLM_CONFIG_VARS first 200 chars: ${LLM_CONFIG_VARS:0:200}"
+        fi
+        echo "::endgroup::"
+
         if [ -n "$LLM_CONFIG_INPUT" ] || [ -n "$LLM_CONFIG_VARS" ]; then
           echo "use_litellm=true" >> "$GITHUB_OUTPUT"
         else

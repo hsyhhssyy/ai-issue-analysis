@@ -39,27 +39,30 @@
        }
        ```
 
-3. 把下面两个文件拷贝到你的仓库里，文件夹不要变
+3. 把下面两个文件拷贝到你的仓库里
 
-    - [`.github/workflows/ai-issue-analysis.yml`](.github/workflows/ai-issue-analysis.yml)
-    - [`.claude/skills/generic-issue-log-analysis/SKILL.md`](.claude/skills/generic-issue-log-analysis/SKILL.md)
+  - 把 [`examples/ai-issue-analysis.yml`](examples/ai-issue-analysis.yml) 保存为你仓库里的 `.github/workflows/ai-issue-analysis.yml`
+  - 把 [`.claude/skills/generic-issue-log-analysis/SKILL.md`](.claude/skills/generic-issue-log-analysis/SKILL.md) 保存为你仓库里的 `.claude/skills/generic-issue-log-analysis/SKILL.md`
 
-4. Action 会自动检测仓库 Variable `LLM_CONFIG`。你的 workflow 只需最简配置，无需传任何模型参数：
+4. 在 workflow 里显式把仓库 Variable `LLM_CONFIG` 传给 action：
 
     ```yaml
     steps:
       - name: Analyze issue with AI
-        uses: Misteo/ai-issue-analysis@main
+        uses: hsyhhssyy/ai-issue-analysis@main
         with:
+          llm-config-json: ${{ vars.LLM_CONFIG }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           bot-name: "@github-actions"
     ```
 
-    > 想换模型、调参数？去 GitHub Settings 改 `LLM_CONFIG` Variable 即可，workflow 文件终身不用动。
+    > 想换模型、调参数？去 GitHub Settings 改 `LLM_CONFIG` Variable 即可，workflow 文件本身只需保留这条显式传参。
     >
     > Action 会自动将 `LLM_API_KEY`、`DEEPSEEK_API_KEY`、`OPENAI_API_KEY` 这三个 Secret 暴露为环境变量，供 `${VAR_NAME}` 占位符展开。
     >
     > `provider` 可设为 `deepseek`（走 LiteLLM 官方 DeepSeek provider）、`openai-compatible`（走通用 OpenAI 兼容端点，需要同时传 `base_url`）、`openai`、`github` 等。完整列表见 [LiteLLM Providers](https://docs.litellm.ai/docs/providers)。
+    >
+    > 仓库内的 [`.github/workflows/ai-issue-analysis.yml`](.github/workflows/ai-issue-analysis.yml) 是这个 action 仓库自身的自测 workflow，外部项目请复制 [examples/ai-issue-analysis.yml](examples/ai-issue-analysis.yml)。
 
 5. 新提个 issue 测试下能否正常运行了，或者在以前的 issue 里 `@github-actions`。
 
@@ -77,7 +80,7 @@
      - Name: `COPILOT_GITHUB_TOKEN`
      - Secret: 上一步中生成的那个
 
-4. 拷贝 `.github/workflows/ai-issue-analysis.yml` 和 `.claude/skills/generic-issue-log-analysis/SKILL.md` 到你的仓库。
+4. 把 `examples/ai-issue-analysis.yml` 保存为你仓库里的 `.github/workflows/ai-issue-analysis.yml`，再把 `.claude/skills/generic-issue-log-analysis/SKILL.md` 保存到对应路径。
 
 5. 新提个 issue 测试下能否正常运行了，或者在以前的 issue 里 `@github-actions`
 
@@ -97,7 +100,7 @@
     如果你的 workflow_dispatch 输入名不是 `issue_number`，或者你在其他事件里调用这个 action，就显式传 `issue-number`。
 
 - `github-token`: 用于创建和更新 Issue 评论
-- `copilot-github-token`: （方式二）Copilot CLI 使用的 Fine-grained token。仅在未配置 `LLM_CONFIG` Variable 且未传 `llm-config-json` 时才会用到。支持多 token 逐行填写，随机选用
+- `copilot-github-token`: （方式二）Copilot CLI 使用的 Fine-grained token。仅在未传 `llm-config-json` 时才会用到。支持多 token 逐行填写，随机选用
 - `llm-config-json`: （方式一）JSON 对象或数组，描述 LiteLLM 模型配置。支持字段：`provider`、`model`、`api_key`、`api_base` 或 `base_url`、`reasoning_effort`、`max_output_tokens`、`temperature`、`headers`、`litellm_params` 等。字符串值中 `${VAR_NAME}` 会自动展开为同名环境变量，方便把密钥放进 Secret、配置放进 Variable。传数组时每次运行随机选一个
 - `litellm-package`: （方式一）安装 LiteLLM 用的 Python 包名，默认 `litellm`
 - `analysis-max-iterations`: （方式一）工具调用最大轮次，默认 `12`
@@ -150,7 +153,7 @@
 - action 内部会自动 `checkout` 调用方仓库
 - 如果调用方已经自己 checkout，或者前置步骤会生成工作区文件，可以把 `checkout-repository` 设为 `false`
 
-**当传入 `llm-config-json` 时（方式一 / LiteLLM 路径）：**
+**当 workflow 传入 `llm-config-json` 时（方式一 / LiteLLM 路径）：**
 
 - action 会在自有 venv 里安装 LiteLLM，不污染系统 Python
 - 新运行器会拉取当前 issue 与评论，提供仓库读取、代码搜索、目录浏览、附件下载、压缩包解压等工具给模型调用

@@ -44,6 +44,10 @@ jobs:
       - name: Analyze issue with AI
         id: analysis
         uses: ./
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         with:
           checkout-repository: "false"
           llm-config-json: ${{ vars.LLM_CONFIG }}
@@ -59,6 +63,10 @@ jobs:
       # - name: Analyze issue with AI
       #   id: analysis
       #   uses: ./
+      #   env:
+      #     LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      #     DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      #     OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       #   with:
       #     copilot-github-token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
       #     bot-name: "@github-actions"

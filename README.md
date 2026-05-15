@@ -50,6 +50,10 @@
     steps:
       - name: Analyze issue with AI
         uses: hsyhhssyy/ai-issue-analysis@main
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         with:
           llm-config-json: ${{ vars.LLM_CONFIG }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -58,7 +62,7 @@
 
     > 想换模型、调参数？去 GitHub Settings 改 `LLM_CONFIG` Variable 即可，workflow 文件本身只需保留这条显式传参。
     >
-    > Action 会自动将 `LLM_API_KEY`、`DEEPSEEK_API_KEY`、`OPENAI_API_KEY` 这三个 Secret 暴露为环境变量，供 `${VAR_NAME}` 占位符展开。
+    > 如果 `llm-config-json` 里用了 `${VAR_NAME}` 占位符，需要在调用 action 的 step 上通过 `env:` 显式把对应 Secret 传进来。
     >
     > `provider` 可设为 `deepseek`（走 LiteLLM 官方 DeepSeek provider）、`openai-compatible`（走通用 OpenAI 兼容端点，需要同时传 `base_url`）、`openai`、`github` 等。完整列表见 [LiteLLM Providers](https://docs.litellm.ai/docs/providers)。
     >
@@ -101,7 +105,7 @@
 
 - `github-token`: 用于创建和更新 Issue 评论
 - `copilot-github-token`: （方式二）Copilot CLI 使用的 Fine-grained token。仅在未传 `llm-config-json` 时才会用到。支持多 token 逐行填写，随机选用
-- `llm-config-json`: （方式一）JSON 对象或数组，描述 LiteLLM 模型配置。支持字段：`provider`、`model`、`api_key`、`api_base` 或 `base_url`、`reasoning_effort`、`max_output_tokens`、`temperature`、`headers`、`litellm_params` 等。字符串值中 `${VAR_NAME}` 会自动展开为同名环境变量，方便把密钥放进 Secret、配置放进 Variable。传数组时每次运行随机选一个
+- `llm-config-json`: （方式一）JSON 对象或数组，描述 LiteLLM 模型配置。支持字段：`provider`、`model`、`api_key`、`api_base` 或 `base_url`、`reasoning_effort`、`max_output_tokens`、`temperature`、`headers`、`litellm_params` 等。字符串值中 `${VAR_NAME}` 会自动展开为同名环境变量；如果用了这类占位符，请在 workflow 的 `env:` 里显式传入对应 Secret。传数组时每次运行随机选一个
 - `litellm-package`: （方式一）安装 LiteLLM 用的 Python 包名，默认 `litellm`
 - `analysis-max-iterations`: （方式一）工具调用最大轮次，默认 `12`
 - `bot-name`: 从 `issue_comment` 正文中剥离掉的 bot mention，比如 `@YourBot`

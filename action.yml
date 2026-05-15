@@ -10,10 +10,6 @@ inputs:
   github-token:
     description: GitHub token used to create and update issue comments.
     required: true
-  copilot-github-token:
-    description: Legacy fine-grained GitHub token with Copilot access for the Copilot CLI fallback path. Supports multiple tokens, one per line, and randomly picks one.
-    required: false
-    default: ""
   bot-name:
     description: Bot mention to strip from issue_comment messages before appending extra requirements.
     required: false
@@ -34,37 +30,25 @@ inputs:
     required: false
     default: 点击此处展开分析过程
   prompt-template:
-    description: Base prompt template. Supported placeholders are {{issue_number}}, {{copilot_answer_file}}, {{repository}}, and {{event_name}}.
+    description: Base prompt template. Supported placeholders are {{issue_number}}, {{answer_file}}, {{repository}}, and {{event_name}}.
     required: false
-    default: 分析 GitHub Issue {{issue_number}}。把最终结论写到 {{copilot_answer_file}}。
+    default: 分析 GitHub Issue {{issue_number}}。把最终结论写到 {{answer_file}}。
   comment-prompt-template:
     description: Extra prompt appended when the triggering issue comment still has content after removing the bot mention. Supported placeholders also include {{comment_body}}.
     required: false
     default: 补充要求：{{comment_body}}
-  llm-config-json:
-    description: JSON object or array describing the LiteLLM model config. Supports fields such as provider, model, api_key, api_base or base_url, reasoning_effort, headers, litellm_params, include_reasoning_content, and vision_enabled. Takes precedence over config-file when both are provided.
-    required: false
-    default: ""
   config-file:
-    description: Path to a JSON config file in the repository (e.g. .github/repository-ai-tool/llm-config.json). Used when llm-config-json is empty. Supports env var placeholders like ${VAR_NAME}.
+    description: Path to a JSON config file in the repository (e.g. .github/repository-ai-tool/llm-config.json). Supports env var placeholders like ${VAR_NAME}.
     required: false
     default: .github/repository-ai-tool/llm-config.json
   litellm-package:
-    description: Python package spec used to install LiteLLM for the llm-config-json path.
+    description: Python package spec used to install LiteLLM for the config file path.
     required: false
     default: litellm
   analysis-max-iterations:
     description: Maximum tool-calling iterations for the LiteLLM analysis runner.
     required: false
     default: "12"
-  copilot-model:
-    description: Legacy Copilot CLI model name for the fallback path.
-    required: false
-    default: gpt-5.4
-  copilot-reasoning-effort:
-    description: Legacy Copilot CLI reasoning effort for the fallback path.
-    required: false
-    default: xhigh
   stream-update-interval-seconds:
     description: Number of seconds between streamed comment updates.
     required: false
@@ -73,24 +57,20 @@ inputs:
     description: Directory used for temporary prompt, output, and comment files.
     required: false
     default: .cache
-  copilot-answer-file:
-    description: File path where the prompt asks Copilot to write the final answer.
+  answer-file:
+    description: File path where the analysis agent writes the final answer.
     required: false
     default: copilot_answer.md
-  copilot-package:
-    description: NPM package to install for the legacy Copilot CLI fallback path.
-    required: false
-    default: "@github/copilot"
   checkout-repository:
     description: Whether to run actions/checkout inside the action before analysis.
     required: false
     default: "true"
   process-error-message:
-    description: Fallback message shown in the full analysis log when the Copilot answer file is not found.
+    description: Fallback message shown in the full analysis log when the answer file is not found.
     required: false
     default: 分析过程出现错误，请重试。
   result-error-message:
-    description: Fallback message written into the final issue comment when the Copilot answer file is not found.
+    description: Fallback message written into the final issue comment when the answer file is not found.
     required: false
     default: 分析结果出现错误，请重试。
   extra-comment-content:
@@ -109,13 +89,13 @@ outputs:
     description: The URL of the issue comment that was created and then updated.
     value: ${{ steps.run_action.outputs.comment-url }}
   analysis-prompt:
-    description: Final rendered prompt passed to Copilot for this run.
+    description: Final rendered prompt passed to the analysis agent for this run.
     value: ${{ steps.run_action.outputs.analysis-prompt }}
-  copilot-output:
-    description: Execution log including pre-run parameters, prompt, and Copilot stdout and stderr.
-    value: ${{ steps.run_action.outputs.copilot-output }}
+  analysis-output:
+    description: Execution log including pre-run parameters, prompt, and agent stdout and stderr.
+    value: ${{ steps.run_action.outputs.analysis-output }}
   final-conclusion:
-    description: Final conclusion content produced by Copilot.
+    description: Final conclusion content produced by the analysis agent.
     value: ${{ steps.run_action.outputs.final-conclusion }}
 
 runs:
@@ -137,34 +117,30 @@ runs:
         GITHUB_SERVER_URL: ${{ github.server_url }}
         INPUT_ISSUE_NUMBER: ${{ inputs.issue-number }}
         INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
-        INPUT_COPILOT_GITHUB_TOKEN: ${{ inputs.copilot-github-token }}
         INPUT_BOT_NAME: ${{ inputs.bot-name }}
         INPUT_INITIAL_COMMENT_BODY: ${{ inputs.initial-comment-body }}
         INPUT_ACTION_LINK_TEXT: ${{ inputs.action-link-text }}
         INPUT_DETAILS_SUMMARY: ${{ inputs.details-summary }}
         INPUT_PROMPT_TEMPLATE: ${{ inputs.prompt-template }}
         INPUT_COMMENT_PROMPT_TEMPLATE: ${{ inputs.comment-prompt-template }}
-        INPUT_LLM_CONFIG_JSON: ${{ inputs.llm-config-json }}
+        INPUT_CONFIG_FILE: ${{ inputs.config-file }}
         INPUT_LITELLM_PACKAGE: ${{ inputs.litellm-package }}
         INPUT_ANALYSIS_MAX_ITERATIONS: ${{ inputs.analysis-max-iterations }}
-        INPUT_COPILOT_MODEL: ${{ inputs.copilot-model }}
-        INPUT_COPILOT_REASONING_EFFORT: ${{ inputs.copilot-reasoning-effort }}
         INPUT_STREAM_UPDATE_INTERVAL_SECONDS: ${{ inputs.stream-update-interval-seconds }}
         INPUT_CACHE_DIR: ${{ inputs.cache-dir }}
-        INPUT_COPILOT_ANSWER_FILE: ${{ inputs.copilot-answer-file }}
-        INPUT_COPILOT_PACKAGE: ${{ inputs.copilot-package }}
+        INPUT_ANSWER_FILE: ${{ inputs.answer-file }}
         INPUT_PROCESS_ERROR_MESSAGE: ${{ inputs.process-error-message }}
         INPUT_RESULT_ERROR_MESSAGE: ${{ inputs.result-error-message }}
         INPUT_EXTRA_COMMENT_CONTENT: ${{ inputs.extra-comment-content }}
       run: |
         python3 "$GITHUB_ACTION_PATH/scripts/run_action.py"
 
-    - name: Upload Copilot output artifact
+    - name: Upload analysis output artifact
       if: ${{ always() }}
       uses: actions/upload-artifact@v4
       with:
-        name: copilot-output-issue-${{ steps.run_action.outputs.issue-number || 'unknown' }}-comment-${{ steps.run_action.outputs.comment-id || 'none' }}
-        path: ${{ steps.run_action.outputs.copilot-output-artifact-file }}
+        name: analysis-output-issue-${{ steps.run_action.outputs.issue-number || 'unknown' }}-comment-${{ steps.run_action.outputs.comment-id || 'none' }}
+        path: ${{ steps.run_action.outputs.output-artifact-file }}
         if-no-files-found: error
 
     - name: Upload final conclusion artifact

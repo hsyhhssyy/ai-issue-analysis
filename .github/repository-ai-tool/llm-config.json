@@ -1,0 +1,17 @@
+{
+  "models": [
+    {
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
+      "api_base": "https://api.deepseek.com/v1",
+      "reasoning_effort": "high",
+      "include_reasoning_content": true
+    },
+    {
+      "provider": "openrouter",
+      "model": "qwen/qwen3.5-flash-02-23"
+    }
+  ],
+  "reasoning_model": "deepseek/deepseek-v4-flash",
+  "vision_model": "openrouter/qwen/qwen3.5-flash-02-23"
+}

@@ -15,7 +15,7 @@ on:
         type: number
 
 jobs:
-  copilot-analysis:
+  ai-analysis:
     if: |
       (github.event_name == 'issues' && github.event.action == 'opened') ||
       github.event_name == 'workflow_dispatch' ||
@@ -31,37 +31,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 方式一（推荐）：将 LLM 配置放在仓库的 .github/repository-ai-tool/llm-config.json 文件中
-      # 支持多模型（数组）和每个模型的多 key（Secret 内每行一个），运行时两层随机选取
+      # LLM_API_KEY 是一个 JSON 格式的 Secret，包含所有模型及其 API Key：
+      # {
+      #   "deepseek/deepseek-chat": "sk-xxx",
+      #   "openai/gpt-4o": "sk-yyy"
+      # }
       - name: Analyze issue with AI (config file)
         id: analysis
-        uses: hsyhhssyy/ai-issue-analysis@main
+        uses: hsyhhssyy/ai-issue-analysis@v2
         env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
         with:
           bot-name: "@github-actions"
           github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # 方式二：通过 GitHub Variables 传入 llm-config-json（兼容旧方式）
-      # - name: Analyze issue with AI (GitHub Variables)
-      #   id: analysis
-      #   uses: hsyhhssyy/ai-issue-analysis@main
-      #   env:
-      #     LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-      #   with:
-      #     llm-config-json: ${{ vars.LLM_CONFIG }}
-      #     bot-name: "@github-actions"
-      #     github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # 方式三：使用 Copilot CLI 回退路径
-      # - name: Analyze issue with AI
-      #   id: analysis
-      #   uses: hsyhhssyy/ai-issue-analysis@main
-      #   with:
-      #     copilot-github-token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
-      #     bot-name: "@github-actions"
-      #     github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 查看完整输入输出
         if: always()
@@ -70,12 +52,12 @@ jobs:
           ISSUE_NUMBER: ${{ steps.analysis.outputs.issue-number }}
           COMMENT_ID: ${{ steps.analysis.outputs.comment-id }}
           COMMENT_URL: ${{ steps.analysis.outputs.comment-url }}
-          COPILOT_OUTPUT: ${{ steps.analysis.outputs.copilot-output }}
+          ANALYSIS_OUTPUT: ${{ steps.analysis.outputs.analysis-output }}
           FINAL_CONCLUSION: ${{ steps.analysis.outputs.final-conclusion }}
         run: |
           printf '%s\n' "$ANALYSIS_PROMPT"
           echo "issue_number=$ISSUE_NUMBER"
           echo "comment_id=$COMMENT_ID"
           echo "comment_url=$COMMENT_URL"
-          printf '%s\n' "$COPILOT_OUTPUT"
+          printf '%s\n' "$ANALYSIS_OUTPUT"
           printf '%s\n' "$FINAL_CONCLUSION"

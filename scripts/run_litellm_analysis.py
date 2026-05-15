@@ -163,7 +163,12 @@ def normalize_model_name(config: dict[str, Any]) -> str:
     if not model:
         raise SystemExit("Selected LLM config is missing required field 'model'.")
 
+    # Models that already contain a full provider path (e.g. "deepseek/deepseek-chat")
     if "/" in model:
+        # OpenRouter needs the "openrouter/" prefix even when the upstream model
+        # already includes a provider segment.
+        if provider == "openrouter" and not model.startswith("openrouter/"):
+            return f"openrouter/{model}"
         return model
 
     if provider in {"openai-compatible", "openai_compatible", "openai-compatible-endpoint"}:
@@ -175,86 +180,117 @@ def normalize_model_name(config: dict[str, Any]) -> str:
     return model
 
 
-def normalize_llm_config(raw_value: str) -> tuple[dict[str, Any], dict[str, Any], int, bool, bool]:
-    parsed = try_json_loads(raw_value)
-    configs: list[dict[str, Any]]
+def _lookup_key_in_map(model_identifier: str, key_map: dict[str, Any]) -> str | None:
+    """Look up the API key for a model in the LLM_API_KEY JSON map.
 
-    if isinstance(parsed, dict):
-        configs = [parsed]
-    elif isinstance(parsed, list) and all(isinstance(item, dict) for item in parsed):
-        configs = list(parsed)
-    else:
-        raise SystemExit("llm-config-json must be a JSON object or an array of JSON objects.")
+    Tries exact match first, then provider-only match, then prefix match.
+    """
+    # Exact match: "deepseek/deepseek-chat"
+    if model_identifier in key_map:
+        value = key_map[model_identifier]
+        return str(value) if value else None
 
-    if not configs:
-        raise SystemExit("llm-config-json does not contain any selectable config.")
+    provider = model_identifier.split("/")[0] if "/" in model_identifier else model_identifier
 
-    selected = random.choice(configs)
-    model = normalize_model_name(selected)
-    include_reasoning_content = selected.get("include_reasoning_content", False)
-    if not isinstance(include_reasoning_content, bool):
-        raise SystemExit("llm-config-json field 'include_reasoning_content' must be a boolean when provided.")
+    # Provider-only match: "deepseek"
+    if provider in key_map:
+        value = key_map[provider]
+        return str(value) if value else None
 
-    vision_enabled = selected.get("vision_enabled", False)
-    if not isinstance(vision_enabled, bool):
-        raise SystemExit("llm-config-json field 'vision_enabled' must be a boolean when provided.")
+    # Prefix match: key starts with "deepseek/"
+    for key, value in key_map.items():
+        if isinstance(key, str) and key.startswith(f"{provider}/"):
+            return str(value) if value else None
 
-    litellm_params = selected.get("litellm_params")
+    return None
+
+
+def _build_litellm_params(config: dict[str, Any]) -> dict[str, Any]:
+    """Build LiteLLM completion parameters from a single model config entry."""
+    model = normalize_model_name(config)
+
+    litellm_params = config.get("litellm_params")
     if litellm_params is not None and not isinstance(litellm_params, dict):
         raise SystemExit("llm-config-json field 'litellm_params' must be an object when provided.")
 
     params: dict[str, Any] = dict(litellm_params or {})
     params["model"] = model
 
-    api_key = selected.get("api_key")
+    api_key = config.get("api_key")
     if api_key is not None:
         params["api_key"] = api_key
 
-    api_base = selected.get("api_base") or selected.get("base_url") or selected.get("host")
+    api_base = config.get("api_base") or config.get("base_url") or config.get("host")
     if api_base:
         params["api_base"] = str(api_base)
 
-    api_version = selected.get("api_version")
+    api_version = config.get("api_version")
     if api_version:
         params["api_version"] = api_version
 
-    headers = selected.get("headers") or selected.get("extra_headers")
+    headers = config.get("headers") or config.get("extra_headers")
     if headers is not None:
         if not isinstance(headers, dict):
             raise SystemExit("llm-config-json field 'headers' must be an object when provided.")
         params["extra_headers"] = headers
 
-    if "reasoning_effort" in selected:
-        params["reasoning_effort"] = selected.get("reasoning_effort")
+    if "reasoning_effort" in config:
+        params["reasoning_effort"] = config.get("reasoning_effort")
 
-    if "temperature" in selected:
-        params["temperature"] = selected.get("temperature")
+    if "temperature" in config:
+        params["temperature"] = config.get("temperature")
 
-    if "max_tokens" in selected:
-        params["max_tokens"] = selected.get("max_tokens")
-    elif "max_output_tokens" in selected:
-        params["max_tokens"] = selected.get("max_output_tokens")
+    if "max_tokens" in config:
+        params["max_tokens"] = config.get("max_tokens")
+    elif "max_output_tokens" in config:
+        params["max_tokens"] = config.get("max_output_tokens")
 
-    if "timeout_seconds" in selected:
-        params["timeout"] = selected.get("timeout_seconds")
-    elif "timeout" in selected:
-        params["timeout"] = selected.get("timeout")
+    if "timeout_seconds" in config:
+        params["timeout"] = config.get("timeout_seconds")
+    elif "timeout" in config:
+        params["timeout"] = config.get("timeout")
 
-    if "top_p" in selected:
-        params["top_p"] = selected.get("top_p")
+    if "top_p" in config:
+        params["top_p"] = config.get("top_p")
 
-    if "frequency_penalty" in selected:
-        params["frequency_penalty"] = selected.get("frequency_penalty")
+    if "frequency_penalty" in config:
+        params["frequency_penalty"] = config.get("frequency_penalty")
 
-    if "presence_penalty" in selected:
-        params["presence_penalty"] = selected.get("presence_penalty")
+    if "presence_penalty" in config:
+        params["presence_penalty"] = config.get("presence_penalty")
 
     params.setdefault("drop_params", True)
 
-    selected = expand_env_vars_in_config(selected)
     params = expand_env_vars_in_config(params)
 
-    # Support multiple API keys (one per line) — randomly pick one, same as copilot-github-token
+    # --- Resolve api_key from LLM_API_KEY environment variable ---
+    # Model entries no longer carry api_key placeholders.  Instead the code
+    # reads LLM_API_KEY directly from the environment.  The value must be a
+    # JSON object mapping model identifiers to their keys:
+    #   {"deepseek/deepseek-chat": "sk-xxx", "openai/gpt-4o": "sk-yyy"}
+    # Provider-only keys ("deepseek", "openai") are also accepted.
+    if "api_key" not in params:
+        llm_api_key_raw = os.environ.get("LLM_API_KEY", "").strip()
+        if llm_api_key_raw:
+            try:
+                key_map = json.loads(llm_api_key_raw)
+            except json.JSONDecodeError:
+                key_map = None
+            if isinstance(key_map, dict):
+                resolved = _lookup_key_in_map(model, key_map)
+                if resolved:
+                    params["api_key"] = resolved
+                else:
+                    log(
+                        f"Warning: model '{model}' not found in LLM_API_KEY JSON. "
+                        f"Available: {list(key_map.keys())}. "
+                        f"LLM calls for this model may fail."
+                    )
+            else:
+                # Plain string — use directly as the key for every model
+                params["api_key"] = llm_api_key_raw
+
+    # Support multiple API keys (one per line) — randomly pick one for load balancing
     api_key_value = params.get("api_key")
     if isinstance(api_key_value, str) and api_key_value.strip():
         keys = [line.strip() for line in api_key_value.splitlines() if line.strip()]
@@ -265,7 +301,70 @@ def normalize_llm_config(raw_value: str) -> tuple[dict[str, Any], dict[str, Any]
         elif keys:
             params["api_key"] = keys[0]
 
-    return selected, params, len(configs), include_reasoning_content, vision_enabled
+    return params
+
+
+def _find_model_config(models: list[dict[str, Any]], identifier: str, label: str) -> dict[str, Any]:
+    """Find a model config entry in the models array by its normalized name (provider/model)."""
+    if not identifier:
+        raise SystemExit(f"llm-config-json '{label}' must be a non-empty string.")
+    for entry in models:
+        if normalize_model_name(entry) == identifier:
+            return entry
+    available = [normalize_model_name(m) for m in models]
+    raise SystemExit(
+        f"llm-config-json '{label}' value '{identifier}' does not match any model in the 'models' array. "
+        f"Available models: {', '.join(available) if available else '(none)'}"
+    )
+
+
+def normalize_llm_config(raw_value: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None, dict[str, Any] | None, int, bool, bool]:
+    """Parse the new-style llm-config JSON and return resolved configuration.
+
+    Returns:
+        reasoning_config: The raw model config entry selected for reasoning (env vars expanded).
+        reasoning_params: LiteLLM completion params for the reasoning model.
+        vision_config: The raw model config entry selected for vision, or None.
+        vision_params: LiteLLM completion params for the vision model, or None.
+        model_count: Total number of entries in the 'models' array.
+        include_reasoning_content: Whether reasoning_content passthrough is requested.
+        vision_enabled: Whether vision is enabled (vision_model is configured).
+    """
+    parsed = try_json_loads(raw_value)
+
+    if not isinstance(parsed, dict):
+        raise SystemExit("llm-config-json must be a JSON object with 'models' array, 'reasoning_model', and optional 'vision_model'.")
+
+    models: list[dict[str, Any]] = parsed.get("models", [])
+    if not isinstance(models, list) or not all(isinstance(item, dict) for item in models):
+        raise SystemExit("llm-config-json 'models' must be a non-empty array of JSON objects.")
+    if not models:
+        raise SystemExit("llm-config-json 'models' array must not be empty.")
+
+    reasoning_identifier = str(parsed.get("reasoning_model", "")).strip()
+    if not reasoning_identifier:
+        raise SystemExit("llm-config-json 'reasoning_model' is required and must be a non-empty string.")
+
+    reasoning_config = _find_model_config(models, reasoning_identifier, "reasoning_model")
+    reasoning_config = expand_env_vars_in_config(reasoning_config)
+    reasoning_params = _build_litellm_params(reasoning_config)
+
+    include_reasoning_content = reasoning_config.get("include_reasoning_content", False)
+    if not isinstance(include_reasoning_content, bool):
+        raise SystemExit("llm-config-json field 'include_reasoning_content' must be a boolean when provided.")
+
+    vision_identifier = str(parsed.get("vision_model", "")).strip()
+    vision_config: dict[str, Any] | None = None
+    vision_params: dict[str, Any] | None = None
+    vision_enabled = False
+
+    if vision_identifier:
+        vision_config = _find_model_config(models, vision_identifier, "vision_model")
+        vision_config = expand_env_vars_in_config(vision_config)
+        vision_params = _build_litellm_params(vision_config)
+        vision_enabled = True
+
+    return reasoning_config, reasoning_params, vision_config, vision_params, len(models), include_reasoning_content, vision_enabled
 
 
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -1008,6 +1107,79 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 
+VISION_ANALYSIS_PROMPT = textwrap.dedent(
+    """
+    Please analyze this image in detail and describe everything visible in it.
+    Include in your description:
+    - All text content (error messages, logs, code, labels, etc.)
+    - UI elements, windows, dialogs, buttons, menus
+    - Diagrams, charts, graphs, or visual data representations
+    - Screenshots of applications, terminals, or web pages
+    - Any anomalies, errors, or notable visual patterns
+    - Photographs: describe the scene, objects, people, and context
+
+    Be thorough and specific. Write in the same language as the visible content when possible.
+    Do NOT summarize or omit details — the reader needs to understand the image without seeing it.
+    """
+).strip()
+
+VISION_ANALYSIS_DIR = DOWNLOAD_ROOT / "vision_analysis"
+
+
+def _analyze_image_with_vision_model(
+    image_data_url: str,
+    image_local_path: str,
+    vision_params: dict[str, Any],
+    *,
+    extra_prompt: str = "",
+) -> str:
+    """Call the vision model to analyze a single image, save result to disk.
+
+    Returns the analysis text.  The result is also persisted under
+    VISION_ANALYSIS_DIR with a filename derived from the image path.
+    """
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", Path(image_local_path).name or "image")
+    analysis_file = VISION_ANALYSIS_DIR / f"{safe_name}.md"
+
+    prompt = VISION_ANALYSIS_PROMPT
+    if extra_prompt:
+        prompt = f"{prompt}\n\nAdditional instructions: {extra_prompt}"
+
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": image_data_url, "detail": "auto"}},
+            ],
+        }
+    ]
+
+    try:
+        response = litellm.completion(
+            model=vision_params["model"],
+            messages=messages,
+            api_key=vision_params.get("api_key"),
+            api_base=vision_params.get("api_base"),
+            api_version=vision_params.get("api_version"),
+            extra_headers=vision_params.get("extra_headers"),
+            max_tokens=vision_params.get("max_tokens", 4096),
+            temperature=vision_params.get("temperature", 0.1),
+            timeout=vision_params.get("timeout", 120),
+            drop_params=True,
+        )
+        analysis_text = extract_message_content(response.choices[0].message).strip()
+    except Exception as exc:
+        analysis_text = f"[Vision model analysis failed: {exc}]"
+        log(f"Vision model call failed for {image_local_path}: {exc}")
+
+    VISION_ANALYSIS_DIR.mkdir(parents=True, exist_ok=True)
+    analysis_file.write_text(analysis_text, encoding="utf-8")
+    log(f"Vision analysis saved: {analysis_file.relative_to(WORKSPACE_ROOT).as_posix()} ({len(analysis_text)} chars)")
+
+    return analysis_text
+
+
 def extract_message_content(message: Any) -> str:
     content = getattr(message, "content", None)
     if content is None and isinstance(message, dict):
@@ -1145,6 +1317,8 @@ def run_agent(
     max_iterations: int,
     include_reasoning_content: bool,
     vision_enabled: bool = False,
+    vision_params: dict[str, Any] | None = None,
+    reasoning_supports_vision: bool = False,
     github_token: str = "",
 ) -> None:
     skill_prompt = load_skill_prompt()
@@ -1166,6 +1340,8 @@ def run_agent(
 
     # --- Vision: auto-inject issue images into the initial context ---
     image_data_urls: list[str] = []
+    image_local_paths: list[str] = []
+    vision_analysis_entries: list[str] = []
     if vision_enabled:
         image_urls = issue_context.get("image_urls", [])
         if image_urls:
@@ -1175,13 +1351,30 @@ def run_agent(
                 result = download_and_encode_image(img_url, download_dir=img_download_dir, github_token=github_token)
                 if result:
                     image_data_urls.append(result["data_url"])
+                    image_local_paths.append(result["local_path"])
                     log(f"  Loaded image: {result['local_path']} ({result['size_bytes']} bytes)")
-        if image_data_urls:
-            log(f"Attached {len(image_data_urls)} image(s) to the initial conversation context.")
-        else:
-            log("No issue images could be loaded for vision analysis.")
 
-    if image_data_urls:
+            if reasoning_supports_vision:
+                # Reasoning model can see images directly — inject them.
+                log(f"Reasoning model supports vision: attaching {len(image_data_urls)} image(s) directly.")
+            elif vision_params is not None:
+                # Reasoning model does NOT support vision — pre-analyze with vision model.
+                log(f"Reasoning model does NOT support vision: pre-analyzing {len(image_data_urls)} image(s) with vision model ...")
+                for idx, (data_url, local_path) in enumerate(zip(image_data_urls, image_local_paths), start=1):
+                    analysis_text = _analyze_image_with_vision_model(data_url, local_path, vision_params)
+                    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", Path(local_path).name or "image")
+                    analysis_rel_path = Path(".cache/issue-analysis-downloads/vision_analysis") / f"{safe_name}.md"
+                    vision_analysis_entries.append(
+                        f"{idx}. Image: {local_path}\n"
+                        f"   Analysis file: {analysis_rel_path.as_posix()}\n"
+                        f"   Preview: {analysis_text[:500]}{'...' if len(analysis_text) > 500 else ''}"
+                    )
+                log(f"Pre-analyzed {len(vision_analysis_entries)} image(s) with vision model.")
+            else:
+                log("No vision model configured; images will be listed but not analyzed.")
+
+    if image_data_urls and reasoning_supports_vision:
+        # Direct multimodal: inject images as content blocks.
         content_blocks: list[dict[str, Any]] = [
             {"type": "text", "text": environment_context},
         ]
@@ -1192,6 +1385,16 @@ def run_agent(
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content_blocks},
+            {"role": "user", "content": analysis_prompt},
+        ]
+    elif vision_analysis_entries:
+        # Pre-analyzed: inject text references so the reasoning model can read_file them.
+        vision_block = "## Pre-analyzed Issue Images\n\nThe following images were pre-analyzed by a vision model. "
+        vision_block += "Use `read_file` to view the full analysis of any image.\n\n"
+        vision_block += "\n\n".join(vision_analysis_entries)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"{environment_context}\n\n{vision_block}"},
             {"role": "user", "content": analysis_prompt},
         ]
     else:
@@ -1266,17 +1469,39 @@ def run_agent(
                             data_url = view_meta.get("data_url", "")
                             img_path = view_meta.get("path", "unknown")
                             if data_url:
-                                messages.append(
-                                    {
-                                        "role": "user",
-                                        "content": [
-                                            {"type": "text", "text": f"[Image attached: {img_path}]"},
-                                            {"type": "image_url", "image_url": {"url": data_url, "detail": "auto"}},
-                                        ],
-                                    }
-                                )
-                                injected_image = True
-                                log(f"Image injected into conversation: {img_path}")
+                                if reasoning_supports_vision:
+                                    # Reasoning model can see images — inject directly.
+                                    messages.append(
+                                        {
+                                            "role": "user",
+                                            "content": [
+                                                {"type": "text", "text": f"[Image attached: {img_path}]"},
+                                                {"type": "image_url", "image_url": {"url": data_url, "detail": "auto"}},
+                                            ],
+                                        }
+                                    )
+                                    injected_image = True
+                                    log(f"Image injected into conversation: {img_path}")
+                                elif vision_params is not None:
+                                    # Reasoning model cannot see images — pre-analyze with vision model.
+                                    log(f"Pre-analyzing image with vision model: {img_path}")
+                                    analysis_text = _analyze_image_with_vision_model(data_url, img_path, vision_params)
+                                    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", Path(img_path).name or "image")
+                                    analysis_rel_path = Path(".cache/issue-analysis-downloads/vision_analysis") / f"{safe_name}.md"
+                                    messages.append(
+                                        {
+                                            "role": "user",
+                                            "content": (
+                                                f"[Image analyzed: {img_path}]\n"
+                                                f"The image has been pre-analyzed by a vision model. "
+                                                f"Full analysis saved to: {analysis_rel_path.as_posix()}\n\n"
+                                                f"Analysis summary:\n{analysis_text[:800]}"
+                                                f"{'...' if len(analysis_text) > 800 else ''}"
+                                            ),
+                                        }
+                                    )
+                                    injected_image = True
+                                    log(f"Vision analysis injected for: {img_path}")
                     except (json.JSONDecodeError, KeyError):
                         pass  # fall through to normal tool result handling
 
@@ -1332,14 +1557,29 @@ def main() -> int:
     if not analysis_prompt_file.is_file():
         raise SystemExit(f"Analysis prompt file does not exist: {analysis_prompt_file}")
 
-    raw_config, llm_params, config_count, include_reasoning_content, vision_enabled = normalize_llm_config(args.llm_config_json)
-    provider_lower = str(raw_config.get("provider", "")).strip().lower()
-    model_lower = str(llm_params.get("model", "")).strip().lower()
+    reasoning_config, reasoning_params, vision_config, vision_params, model_count, include_reasoning_content, vision_enabled = normalize_llm_config(args.llm_config_json)
+    provider_lower = str(reasoning_config.get("provider", "")).strip().lower()
+    model_lower = str(reasoning_params.get("model", "")).strip().lower()
     is_deepseek_like = provider_lower == "deepseek" or "deepseek" in model_lower
     include_reasoning_content_effective = include_reasoning_content and is_deepseek_like
-    log(f"Selected one config from {config_count} candidate(s).")
-    log("Resolved LiteLLM config:")
-    log(json.dumps(redact_config({**raw_config, "model": llm_params['model']}), ensure_ascii=False, indent=2))
+
+    # Determine whether the reasoning model itself supports vision.
+    # If vision_model is configured and has the same identifier as reasoning_model,
+    # the reasoning model is also the vision model (multimodal).  Otherwise the
+    # vision model acts as a separate pre-processor for images.
+    reasoning_model_id = normalize_model_name(reasoning_config)
+    vision_model_id = normalize_model_name(vision_config) if vision_config else ""
+    reasoning_supports_vision = vision_enabled and reasoning_model_id == vision_model_id
+
+    log(f"Loaded {model_count} model(s) from 'models' array.")
+    log("Resolved reasoning model LiteLLM config:")
+    log(json.dumps(redact_config({**reasoning_config, "model": reasoning_params['model']}), ensure_ascii=False, indent=2))
+    if vision_config is not None:
+        log("Resolved vision model LiteLLM config:")
+        log(json.dumps(redact_config({**vision_config, "model": vision_params['model'] if vision_params else 'unknown'}), ensure_ascii=False, indent=2))
+    log(f"Reasoning model identifier: {reasoning_model_id}")
+    log(f"Vision model identifier: {vision_model_id or '(none)'}")
+    log(f"Reasoning model supports vision: {reasoning_supports_vision}")
     log(f"Include reasoning content (requested): {include_reasoning_content}")
     log(f"DeepSeek-like config detected: {is_deepseek_like}")
     log(f"Include reasoning content (effective): {include_reasoning_content_effective}")
@@ -1361,13 +1601,15 @@ def main() -> int:
     log(f"Attachment URLs found: {len(issue_context['attachment_urls'])}")
 
     run_agent(
-        llm_params=llm_params,
+        llm_params=reasoning_params,
         analysis_prompt=analysis_prompt,
         issue_context=issue_context,
         answer_file=answer_file,
         max_iterations=max(1, args.max_iterations),
         include_reasoning_content=include_reasoning_content_effective,
         vision_enabled=vision_enabled,
+        vision_params=vision_params,
+        reasoning_supports_vision=reasoning_supports_vision,
         github_token=args.github_token,
     )
     return 0

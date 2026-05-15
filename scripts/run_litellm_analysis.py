@@ -28,6 +28,67 @@ DEFAULT_MAX_ITERATIONS = 12
 MAX_TOOL_OUTPUT_CHARS = 20000
 MAX_FILE_LINES = 400
 DEFAULT_URL_TIMEOUT = 60
+MAX_COMMAND_OUTPUT_BYTES = 100000
+
+SAFE_COMMAND_PREFIXES: set[str] = {
+    "git log",
+    "git diff",
+    "git show",
+    "git blame",
+    "git status",
+    "git branch",
+    "git tag",
+    "git rev-parse",
+    "git rev-list",
+    "git shortlog",
+    "git describe",
+    "git ls-files",
+    "git ls-tree",
+    "git cat-file",
+    "git for-each-ref",
+    "git merge-base",
+    "git name-rev",
+    "git count-objects",
+    "git --version",
+    "git version",
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "sort",
+    "uniq",
+    "find",
+    "file",
+    "stat",
+    "du",
+    "df",
+    "uname",
+    "date",
+    "which",
+    "whereis",
+    "echo",
+}
+
+DANGEROUS_SHELL_PATTERNS: list[str] = [
+    "$(", "${", "`",
+    "&&", "||", ";", "&",
+    ">", ">>", "<",
+    "|",
+    "rm ", "rm\t",
+    "chmod ", "chown ",
+    "sudo ", "su ",
+    "kill ", "pkill ",
+    "dd ", "mkfs",
+    "curl ", "wget ",
+    "git push", "git commit", "git add", "git rm", "git mv",
+    "git merge", "git rebase", "git reset", "git stash",
+    "git clean", "git gc", "git checkout", "git cherry-pick",
+    "git revert", "git pull", "git fetch", "git clone",
+    "git remote add", "git remote remove", "git remote set-url",
+    "git init", "git submodule",
+    ">/dev/", ">/proc/", ">/sys/",
+]
 
 
 def log(message: str = "") -> None:
@@ -97,7 +158,7 @@ def normalize_model_name(config: dict[str, Any]) -> str:
     return model
 
 
-def normalize_llm_config(raw_value: str) -> tuple[dict[str, Any], dict[str, Any], int]:
+def normalize_llm_config(raw_value: str) -> tuple[dict[str, Any], dict[str, Any], int, bool]:
     parsed = try_json_loads(raw_value)
     configs: list[dict[str, Any]]
 
@@ -113,6 +174,9 @@ def normalize_llm_config(raw_value: str) -> tuple[dict[str, Any], dict[str, Any]
 
     selected = random.choice(configs)
     model = normalize_model_name(selected)
+    include_reasoning_content = selected.get("include_reasoning_content", False)
+    if not isinstance(include_reasoning_content, bool):
+        raise SystemExit("llm-config-json field 'include_reasoning_content' must be a boolean when provided.")
 
     litellm_params = selected.get("litellm_params")
     if litellm_params is not None and not isinstance(litellm_params, dict):
@@ -169,7 +233,7 @@ def normalize_llm_config(raw_value: str) -> tuple[dict[str, Any], dict[str, Any]
     selected = expand_env_vars_in_config(selected)
     params = expand_env_vars_in_config(params)
 
-    return selected, params, len(configs)
+    return selected, params, len(configs), include_reasoning_content
 
 
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -486,6 +550,68 @@ def download_url_tool(url: str, output_path: str | None = None, timeout_seconds:
     ).strip()
 
 
+def run_command_tool(command: str, *, timeout_seconds: int = 30) -> str:
+    stripped = command.strip()
+    if not stripped:
+        raise ValueError("Command must not be empty.")
+
+    # Block dangerous shell metacharacters / patterns.
+    lowered = stripped.lower()
+    for pattern in DANGEROUS_SHELL_PATTERNS:
+        if pattern in lowered:
+            raise ValueError(
+                f"Command contains a disallowed pattern: {pattern!r}. "
+                f"This tool only supports read-only introspection commands."
+            )
+
+    # Whitelist: command must start with one of the known-safe prefixes.
+    allowed = False
+    for prefix in SAFE_COMMAND_PREFIXES:
+        if lowered.startswith(prefix):
+            allowed = True
+            break
+    if not allowed:
+        raise ValueError(
+            f"Command {command!r} is not in the allowed command whitelist. "
+            f"Allowed prefixes: {', '.join(sorted(SAFE_COMMAND_PREFIXES))}"
+        )
+
+    # Enforce timeout ceiling.
+    effective_timeout = min(max(timeout_seconds, 1), 60)
+
+    try:
+        result = subprocess.run(
+            command,
+            cwd=WORKSPACE_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=effective_timeout,
+            check=False,
+            shell=True,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ValueError(f"Command timed out after {effective_timeout}s: {command}") from error
+    except FileNotFoundError as error:
+        raise ValueError(f"Command not found: {command}") from error
+
+    stdout = normalize_text_block(result.stdout)
+    stderr = normalize_text_block(result.stderr)
+
+    output_parts: list[str] = [f"Exit Code: {result.returncode}"]
+    if stdout:
+        output_parts.append(f"STDOUT:\n{truncate_text(stdout, MAX_TOOL_OUTPUT_CHARS)}")
+    if stderr:
+        output_parts.append(f"STDERR:\n{truncate_text(stderr, min(MAX_TOOL_OUTPUT_CHARS, 4000))}")
+    if not stdout and not stderr:
+        output_parts.append("[No output]")
+
+    full_output = "\n\n".join(output_parts)
+    output_bytes = full_output.encode("utf-8")
+    if len(output_bytes) > MAX_COMMAND_OUTPUT_BYTES:
+        full_output = truncate_text(full_output, MAX_COMMAND_OUTPUT_BYTES - 200)
+    return full_output
+
+
 def extract_archive_tool(path: str, output_dir: str | None = None) -> str:
     archive_path = resolve_workspace_path(path)
     if not archive_path.is_file():
@@ -567,6 +693,11 @@ class ToolExecutor:
             return extract_archive_tool(
                 path=str(arguments.get("path", "")),
                 output_dir=str(output_dir) if output_dir else None,
+            )
+        if name == "run_command":
+            return run_command_tool(
+                command=str(arguments.get("command", "")),
+                timeout_seconds=int(arguments.get("timeout_seconds", 30)),
             )
         raise ValueError(f"Unknown tool: {name}")
 
@@ -680,6 +811,22 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": "Run a read-only shell command inside the workspace (e.g. git log, git diff, git blame, find, cat). Only safe introspective commands are allowed; destructive or mutating operations are blocked.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The exact shell command to run. Must start with an allowed prefix such as 'git log', 'git diff', 'git show', 'git blame', 'git status', 'find', 'cat', 'head', 'tail', 'wc', 'sort', 'uniq', 'ls', 'file', 'stat', 'du', 'uname', 'date', 'echo', etc."},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 60, "description": "Maximum execution time in seconds (capped at 60)."},
+                },
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 
@@ -706,6 +853,22 @@ def extract_message_content(message: Any) -> str:
     return ""
 
 
+def extract_reasoning_content(message: Any) -> str | None:
+    """Extract reasoning_content from a LiteLLM response message.
+
+    DeepSeek thinking mode requires reasoning_content to be passed back in
+    subsequent requests.  Other providers may also populate this field.
+    """
+    reasoning = getattr(message, "reasoning_content", None)
+    if reasoning is None and isinstance(message, dict):
+        reasoning = message.get("reasoning_content")
+    if reasoning is None:
+        return None
+    if isinstance(reasoning, str):
+        return reasoning if reasoning.strip() else None
+    return None
+
+
 def extract_tool_calls(message: Any) -> list[dict[str, Any]]:
     raw_calls = getattr(message, "tool_calls", None)
     if raw_calls is None and isinstance(message, dict):
@@ -730,7 +893,7 @@ def extract_tool_calls(message: Any) -> list[dict[str, Any]]:
     return normalized_calls
 
 
-def serialize_assistant_message(message: Any) -> dict[str, Any]:
+def serialize_assistant_message(message: Any, *, include_reasoning_content: bool = False) -> dict[str, Any]:
     content = extract_message_content(message)
     tool_calls = []
     for tool_call in extract_tool_calls(message):
@@ -752,6 +915,11 @@ def serialize_assistant_message(message: Any) -> dict[str, Any]:
         payload["tool_calls"] = tool_calls
     if not content and not tool_calls:
         payload["content"] = ""
+
+    reasoning = extract_reasoning_content(message)
+    if include_reasoning_content and reasoning:
+        payload["reasoning_content"] = reasoning
+
     return payload
 
 
@@ -797,6 +965,7 @@ def run_agent(
     issue_context: dict[str, Any],
     answer_file: Path,
     max_iterations: int,
+    include_reasoning_content: bool,
 ) -> None:
     skill_prompt = load_skill_prompt()
     system_prompt = build_system_prompt(skill_prompt)
@@ -845,7 +1014,12 @@ def run_agent(
         message = response.choices[0].message
         assistant_content = extract_message_content(message).strip()
         tool_calls = extract_tool_calls(message)
-        messages.append(serialize_assistant_message(message))
+        messages.append(
+            serialize_assistant_message(
+                message,
+                include_reasoning_content=include_reasoning_content,
+            )
+        )
 
         usage = getattr(response, "usage", None)
         if usage is not None:
@@ -916,10 +1090,24 @@ def main() -> int:
     if not analysis_prompt_file.is_file():
         raise SystemExit(f"Analysis prompt file does not exist: {analysis_prompt_file}")
 
-    raw_config, llm_params, config_count = normalize_llm_config(args.llm_config_json)
+    raw_config, llm_params, config_count, include_reasoning_content = normalize_llm_config(args.llm_config_json)
+    provider_lower = str(raw_config.get("provider", "")).strip().lower()
+    model_lower = str(llm_params.get("model", "")).strip().lower()
+    is_deepseek_like = provider_lower == "deepseek" or "deepseek" in model_lower
+    include_reasoning_content_effective = include_reasoning_content and is_deepseek_like
     log(f"Selected one config from {config_count} candidate(s).")
     log("Resolved LiteLLM config:")
     log(json.dumps(redact_config({**raw_config, "model": llm_params['model']}), ensure_ascii=False, indent=2))
+    log(f"Include reasoning content (requested): {include_reasoning_content}")
+    log(f"DeepSeek-like config detected: {is_deepseek_like}")
+    log(f"Include reasoning content (effective): {include_reasoning_content_effective}")
+    if is_deepseek_like and not include_reasoning_content:
+        log(
+            "Warning: DeepSeek-like config detected but include_reasoning_content is not enabled. "
+            "If you are using DeepSeek thinking mode (reasoning_effort set), multi-turn tool calls "
+            "will fail with 'reasoning_content must be passed back to the API'. "
+            "Set '\"include_reasoning_content\": true' in your llm-config-json to fix this."
+        )
 
     analysis_prompt = analysis_prompt_file.read_text(encoding="utf-8")
     issue_context = fetch_issue_context(args.repo, args.issue_number, args.github_token)
@@ -935,6 +1123,7 @@ def main() -> int:
         issue_context=issue_context,
         answer_file=answer_file,
         max_iterations=max(1, args.max_iterations),
+        include_reasoning_content=include_reasoning_content_effective,
     )
     return 0
 

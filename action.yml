@@ -42,7 +42,7 @@ inputs:
     required: false
     default: 补充要求：{{comment_body}}
   llm-config-json:
-    description: JSON object or array describing the LiteLLM model config. Supports fields such as provider, model, api_key, api_base or base_url, reasoning_effort, headers, and litellm_params.
+    description: JSON object or array describing the LiteLLM model config. Supports fields such as provider, model, api_key, api_base or base_url, reasoning_effort, headers, litellm_params, and include_reasoning_content.
     required: false
     default: ""
   litellm-package:

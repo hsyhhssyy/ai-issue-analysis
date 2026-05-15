@@ -34,6 +34,7 @@
          "provider": "deepseek",
          "model": "deepseek-chat",
          "api_key": "${DEEPSEEK_API_KEY}",
+         "include_reasoning_content": true,
          "reasoning_effort": "xhigh",
          "max_output_tokens": 32000
        }
@@ -105,7 +106,7 @@
 
 - `github-token`: 用于创建和更新 Issue 评论
 - `copilot-github-token`: （方式二）Copilot CLI 使用的 Fine-grained token。仅在未传 `llm-config-json` 时才会用到。支持多 token 逐行填写，随机选用
-- `llm-config-json`: （方式一）JSON 对象或数组，描述 LiteLLM 模型配置。支持字段：`provider`、`model`、`api_key`、`api_base` 或 `base_url`、`reasoning_effort`、`max_output_tokens`、`temperature`、`headers`、`litellm_params` 等。字符串值中 `${VAR_NAME}` 会自动展开为同名环境变量；如果用了这类占位符，请在 workflow 的 `env:` 里显式传入对应 Secret。传数组时每次运行随机选一个
+- `llm-config-json`: （方式一）JSON 对象或数组，描述 LiteLLM 模型配置。支持字段：`provider`、`model`、`api_key`、`api_base` 或 `base_url`、`reasoning_effort`、`max_output_tokens`、`temperature`、`headers`、`litellm_params`、`include_reasoning_content`（布尔值）等。字符串值中 `${VAR_NAME}` 会自动展开为同名环境变量；如果用了这类占位符，请在 workflow 的 `env:` 里显式传入对应 Secret。传数组时每次运行随机选一个。`include_reasoning_content` 主要用于 DeepSeek thinking 模式，只有在模型/Provider 判定为 DeepSeek 时才会生效。
 - `litellm-package`: （方式一）安装 LiteLLM 用的 Python 包名，默认 `litellm`
 - `analysis-max-iterations`: （方式一）工具调用最大轮次，默认 `12`
 - `bot-name`: 从 `issue_comment` 正文中剥离掉的 bot mention，比如 `@YourBot`

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import mimetypes
 import os
 import random
 import re
@@ -29,6 +31,21 @@ MAX_TOOL_OUTPUT_CHARS = 20000
 MAX_FILE_LINES = 400
 DEFAULT_URL_TIMEOUT = 60
 MAX_COMMAND_OUTPUT_BYTES = 100000
+MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB per image
+
+IMAGE_EXTENSIONS: set[str] = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".tiff", ".ico"}
+
+IMAGE_MIME_TO_EXT: dict[str, str] = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+    "image/svg+xml": ".svg",
+    "image/tiff": ".tiff",
+    "image/x-icon": ".ico",
+    "image/vnd.microsoft.icon": ".ico",
+}
 
 SAFE_COMMAND_PREFIXES: set[str] = {
     "git log",
@@ -158,7 +175,7 @@ def normalize_model_name(config: dict[str, Any]) -> str:
     return model
 
 
-def normalize_llm_config(raw_value: str) -> tuple[dict[str, Any], dict[str, Any], int, bool]:
+def normalize_llm_config(raw_value: str) -> tuple[dict[str, Any], dict[str, Any], int, bool, bool]:
     parsed = try_json_loads(raw_value)
     configs: list[dict[str, Any]]
 
@@ -177,6 +194,10 @@ def normalize_llm_config(raw_value: str) -> tuple[dict[str, Any], dict[str, Any]
     include_reasoning_content = selected.get("include_reasoning_content", False)
     if not isinstance(include_reasoning_content, bool):
         raise SystemExit("llm-config-json field 'include_reasoning_content' must be a boolean when provided.")
+
+    vision_enabled = selected.get("vision_enabled", False)
+    if not isinstance(vision_enabled, bool):
+        raise SystemExit("llm-config-json field 'vision_enabled' must be a boolean when provided.")
 
     litellm_params = selected.get("litellm_params")
     if litellm_params is not None and not isinstance(litellm_params, dict):
@@ -233,7 +254,18 @@ def normalize_llm_config(raw_value: str) -> tuple[dict[str, Any], dict[str, Any]
     selected = expand_env_vars_in_config(selected)
     params = expand_env_vars_in_config(params)
 
-    return selected, params, len(configs), include_reasoning_content
+    # Support multiple API keys (one per line) — randomly pick one, same as copilot-github-token
+    api_key_value = params.get("api_key")
+    if isinstance(api_key_value, str) and api_key_value.strip():
+        keys = [line.strip() for line in api_key_value.splitlines() if line.strip()]
+        if len(keys) > 1:
+            chosen = random.choice(keys)
+            params["api_key"] = chosen
+            log(f"Multiple API keys detected ({len(keys)} keys); randomly selected one (first 8 chars: {chosen[:8]}...).")
+        elif keys:
+            params["api_key"] = keys[0]
+
+    return selected, params, len(configs), include_reasoning_content, vision_enabled
 
 
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -292,16 +324,21 @@ def extract_urls(text: str) -> list[str]:
     return unique_urls
 
 
-def fetch_issue_context(repo: str, issue_number: str, github_token: str) -> dict[str, Any]:
+def fetch_issue_context(repo: str, issue_number: str, github_token: str, bot_name: str = "") -> dict[str, Any]:
     base_url = f"https://api.github.com/repos/{repo}/issues/{issue_number}"
     headers = github_headers(github_token)
 
     issue = http_request_json(base_url, headers=headers)
     comments = http_request_json(f"{base_url}/comments?per_page=100", headers=headers)
 
+    bot_lower = bot_name.strip().lower()
     attachment_urls: list[str] = []
-    for text in [issue.get("body", "")] + [comment.get("body", "") for comment in comments]:
-        attachment_urls.extend(extract_urls(text))
+    # Always include URLs from the issue body.
+    attachment_urls.extend(extract_urls(issue.get("body", "")))
+    for comment in comments:
+        if bot_lower and (comment.get("user", {}).get("login", "") or "").lower() == bot_lower:
+            continue  # Skip bot's own comments to avoid re-fetching its own action links
+        attachment_urls.extend(extract_urls(comment.get("body", "")))
 
     deduped_urls: list[str] = []
     seen_urls: set[str] = set()
@@ -309,6 +346,9 @@ def fetch_issue_context(repo: str, issue_number: str, github_token: str) -> dict
         if url not in seen_urls:
             deduped_urls.append(url)
             seen_urls.add(url)
+
+    image_urls = [url for url in deduped_urls if is_image_url(url)]
+    non_image_urls = [url for url in deduped_urls if url not in set(image_urls)]
 
     return {
         "issue": {
@@ -332,7 +372,8 @@ def fetch_issue_context(repo: str, issue_number: str, github_token: str) -> dict
             }
             for comment in comments
         ],
-        "attachment_urls": deduped_urls,
+        "attachment_urls": non_image_urls,
+        "image_urls": image_urls,
     }
 
 
@@ -361,6 +402,11 @@ def summarize_issue_context(issue_context: dict[str, Any], *, char_limit: int = 
     if len(issue_context["attachment_urls"]) > 50:
         attachment_lines = f"{attachment_lines}\n- [More attachment URLs omitted]"
 
+    image_urls = issue_context.get("image_urls", [])
+    image_lines = "\n".join(f"- {url}" for url in image_urls[:30]) if image_urls else "[No image URLs found]"
+    if len(image_urls) > 30:
+        image_lines = f"{image_lines}\n- [More image URLs omitted]"
+
     return textwrap.dedent(
         f"""
         Repository Issue Context
@@ -376,8 +422,11 @@ def summarize_issue_context(issue_context: dict[str, Any], *, char_limit: int = 
         Issue Body
         {issue['body'] or '[Empty issue body]'}
 
-        Attachment URLs
-        {attachment_lines or '[No attachment URLs found in issue body or comments]'}
+        Image URLs (screenshots / photos in the issue)
+        {image_lines}
+
+        Other Attachment URLs
+        {attachment_lines or '[No attachment URLs found]'}
 
         Comments
         {'\n\n'.join(comment_blocks) if comment_blocks else '[No comments]'}
@@ -550,6 +599,92 @@ def download_url_tool(url: str, output_path: str | None = None, timeout_seconds:
     ).strip()
 
 
+def is_image_url(url: str) -> bool:
+    """Check whether a URL points to an image based on path extension."""
+    parsed = urllib.parse.urlparse(url)
+    path_lower = parsed.path.lower()
+    return any(path_lower.endswith(ext) for ext in IMAGE_EXTENSIONS)
+
+
+def guess_image_extension(content_type: str | None, url: str) -> str:
+    """Determine the file extension for an image from content-type or URL."""
+    if content_type and content_type in IMAGE_MIME_TO_EXT:
+        return IMAGE_MIME_TO_EXT[content_type]
+    parsed = urllib.parse.urlparse(url)
+    path_lower = parsed.path.lower()
+    for ext in IMAGE_EXTENSIONS:
+        if path_lower.endswith(ext):
+            return ext
+    return ".png"
+
+
+def encode_image_as_data_url(file_path: Path) -> str:
+    """Read an image file and encode it as a base64 data URL."""
+    if not file_path.is_file():
+        raise ValueError(f"Image file does not exist: {file_path}")
+    file_size = file_path.stat().st_size
+    if file_size > MAX_IMAGE_BYTES:
+        raise ValueError(
+            f"Image file is too large: {file_size} bytes (max {MAX_IMAGE_BYTES}). "
+            f"Consider resizing the image before analysis."
+        )
+    if file_size == 0:
+        raise ValueError(f"Image file is empty: {file_path}")
+
+    mime_type, _ = mimetypes.guess_type(str(file_path))
+    if not mime_type or not mime_type.startswith("image/"):
+        raise ValueError(f"File does not appear to be a supported image: {file_path} (detected: {mime_type or 'unknown'})")
+
+    data = file_path.read_bytes()
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def download_and_encode_image(url: str, *, download_dir: Path, github_token: str = "") -> dict[str, str] | None:
+    """Download an image URL and return its data URL and metadata.
+
+    Returns None if the URL could not be fetched or is not an image.
+    """
+    try:
+        headers = {"User-Agent": "ai-issue-analysis"}
+        if github_token and "github" in url.lower():
+            headers.update(github_headers(github_token))
+        payload, content_type = http_request_bytes(url, headers=headers, timeout=30)
+    except Exception as exc:
+        log(f"Image download skipped for {url}: {exc}")
+        return None
+
+    if not payload:
+        return None
+
+    # Validate that the response is actually an image.
+    if content_type and not content_type.startswith("image/") and content_type not in ("application/octet-stream", "binary/octet-stream"):
+        log(f"Skipping non-image URL: {url} (Content-Type: {content_type})")
+        return None
+
+    ext = guess_image_extension(content_type, url)
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", Path(urllib.parse.urlparse(url).path).name or "image")
+    if not safe_name.lower().endswith(tuple(IMAGE_EXTENSIONS)):
+        safe_name = f"{safe_name}{ext}"
+
+    file_path = download_dir / safe_name
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_bytes(payload)
+
+    try:
+        data_url = encode_image_as_data_url(file_path)
+    except ValueError as exc:
+        log(f"Image encoding failed for {url}: {exc}")
+        return None
+
+    return {
+        "url": url,
+        "local_path": file_path.relative_to(WORKSPACE_ROOT).as_posix(),
+        "data_url": data_url,
+        "size_bytes": str(len(payload)),
+    }
+
+
 def run_command_tool(command: str, *, timeout_seconds: int = 30) -> str:
     stripped = command.strip()
     if not stripped:
@@ -610,6 +745,30 @@ def run_command_tool(command: str, *, timeout_seconds: int = 30) -> str:
     if len(output_bytes) > MAX_COMMAND_OUTPUT_BYTES:
         full_output = truncate_text(full_output, MAX_COMMAND_OUTPUT_BYTES - 200)
     return full_output
+
+
+def view_image_tool(path: str) -> str:
+    """Encode a local image file as a base64 data URL and return metadata.
+
+    The returned JSON string contains the data_url so the agent loop can
+    inject the image into the conversation.  Only the agent loop should
+    inspect this structure; the model sees it as a regular tool result.
+    """
+    target = resolve_workspace_path(path)
+    data_url = encode_image_as_data_url(target)
+    file_size = target.stat().st_size
+
+    metadata = json.dumps(
+        {
+            "__view_image": True,
+            "path": target.relative_to(WORKSPACE_ROOT).as_posix(),
+            "data_url": data_url,
+            "size_bytes": file_size,
+        },
+        ensure_ascii=False,
+    )
+    log(f"Image encoded: {target.relative_to(WORKSPACE_ROOT).as_posix()} ({file_size} bytes)")
+    return metadata
 
 
 def extract_archive_tool(path: str, output_dir: str | None = None) -> str:
@@ -698,6 +857,10 @@ class ToolExecutor:
             return run_command_tool(
                 command=str(arguments.get("command", "")),
                 timeout_seconds=int(arguments.get("timeout_seconds", 30)),
+            )
+        if name == "view_image":
+            return view_image_tool(
+                path=str(arguments.get("path", "")),
             )
         raise ValueError(f"Unknown tool: {name}")
 
@@ -823,6 +986,21 @@ TOOLS: list[dict[str, Any]] = [
                     "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 60, "description": "Maximum execution time in seconds (capped at 60)."},
                 },
                 "required": ["command"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "view_image",
+            "description": "View an image file that has been downloaded to the workspace (e.g. a screenshot from the issue or a photo inside a zip attachment). The image will be attached to the conversation so the model can analyze its contents. Supports PNG, JPEG, GIF, WebP, BMP, SVG, TIFF, and ICO formats.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Relative path to the image file under the workspace root."},
+                },
+                "required": ["path"],
                 "additionalProperties": False,
             },
         },
@@ -966,6 +1144,8 @@ def run_agent(
     answer_file: Path,
     max_iterations: int,
     include_reasoning_content: bool,
+    vision_enabled: bool = False,
+    github_token: str = "",
 ) -> None:
     skill_prompt = load_skill_prompt()
     system_prompt = build_system_prompt(skill_prompt)
@@ -984,11 +1164,42 @@ def run_agent(
         """
     ).strip()
 
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": environment_context},
-        {"role": "user", "content": analysis_prompt},
-    ]
+    # --- Vision: auto-inject issue images into the initial context ---
+    image_data_urls: list[str] = []
+    if vision_enabled:
+        image_urls = issue_context.get("image_urls", [])
+        if image_urls:
+            log(f"Vision enabled: downloading {len(image_urls)} image(s) from issue ...")
+            img_download_dir = DOWNLOAD_ROOT / "issue-images"
+            for img_url in image_urls:
+                result = download_and_encode_image(img_url, download_dir=img_download_dir, github_token=github_token)
+                if result:
+                    image_data_urls.append(result["data_url"])
+                    log(f"  Loaded image: {result['local_path']} ({result['size_bytes']} bytes)")
+        if image_data_urls:
+            log(f"Attached {len(image_data_urls)} image(s) to the initial conversation context.")
+        else:
+            log("No issue images could be loaded for vision analysis.")
+
+    if image_data_urls:
+        content_blocks: list[dict[str, Any]] = [
+            {"type": "text", "text": environment_context},
+        ]
+        for data_url in image_data_urls:
+            content_blocks.append(
+                {"type": "image_url", "image_url": {"url": data_url, "detail": "auto"}}
+            )
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": content_blocks},
+            {"role": "user", "content": analysis_prompt},
+        ]
+    else:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": environment_context},
+            {"role": "user", "content": analysis_prompt},
+        ]
 
     tool_executor = ToolExecutor(issue_context)
     tools_enabled = True
@@ -1046,7 +1257,37 @@ def run_agent(
                 except Exception as tool_error:
                     tool_output = tool_error_result(tool_name, tool_error)
 
-                tool_output = truncate_text(tool_output)
+                # --- Handle view_image specially: inject image into conversation ---
+                injected_image = False
+                if tool_name == "view_image" and vision_enabled:
+                    try:
+                        view_meta = json.loads(tool_output)
+                        if isinstance(view_meta, dict) and view_meta.get("__view_image"):
+                            data_url = view_meta.get("data_url", "")
+                            img_path = view_meta.get("path", "unknown")
+                            if data_url:
+                                messages.append(
+                                    {
+                                        "role": "user",
+                                        "content": [
+                                            {"type": "text", "text": f"[Image attached: {img_path}]"},
+                                            {"type": "image_url", "image_url": {"url": data_url, "detail": "auto"}},
+                                        ],
+                                    }
+                                )
+                                injected_image = True
+                                log(f"Image injected into conversation: {img_path}")
+                    except (json.JSONDecodeError, KeyError):
+                        pass  # fall through to normal tool result handling
+
+                tool_output_display = tool_output
+                if injected_image:
+                    # Only show metadata, not the full data URL
+                    tool_output_display = tool_output.replace(
+                        view_meta.get("data_url", ""), "[base64 data URL omitted]"
+                    )
+
+                tool_output = truncate_text(tool_output_display)
                 log("Tool output preview:")
                 log(truncate_text(tool_output, 4000))
                 messages.append(
@@ -1079,6 +1320,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--issue-number", required=True)
     parser.add_argument("--github-token", required=True)
     parser.add_argument("--max-iterations", type=int, default=DEFAULT_MAX_ITERATIONS)
+    parser.add_argument("--bot-name", default="")
     return parser.parse_args()
 
 
@@ -1090,7 +1332,7 @@ def main() -> int:
     if not analysis_prompt_file.is_file():
         raise SystemExit(f"Analysis prompt file does not exist: {analysis_prompt_file}")
 
-    raw_config, llm_params, config_count, include_reasoning_content = normalize_llm_config(args.llm_config_json)
+    raw_config, llm_params, config_count, include_reasoning_content, vision_enabled = normalize_llm_config(args.llm_config_json)
     provider_lower = str(raw_config.get("provider", "")).strip().lower()
     model_lower = str(llm_params.get("model", "")).strip().lower()
     is_deepseek_like = provider_lower == "deepseek" or "deepseek" in model_lower
@@ -1101,6 +1343,7 @@ def main() -> int:
     log(f"Include reasoning content (requested): {include_reasoning_content}")
     log(f"DeepSeek-like config detected: {is_deepseek_like}")
     log(f"Include reasoning content (effective): {include_reasoning_content_effective}")
+    log(f"Vision enabled: {vision_enabled}")
     if is_deepseek_like and not include_reasoning_content:
         log(
             "Warning: DeepSeek-like config detected but include_reasoning_content is not enabled. "
@@ -1110,7 +1353,7 @@ def main() -> int:
         )
 
     analysis_prompt = analysis_prompt_file.read_text(encoding="utf-8")
-    issue_context = fetch_issue_context(args.repo, args.issue_number, args.github_token)
+    issue_context = fetch_issue_context(args.repo, args.issue_number, args.github_token, bot_name=args.bot_name)
 
     log("Issue context fetched successfully.")
     log(f"Issue title: {issue_context['issue']['title']}")
@@ -1124,6 +1367,8 @@ def main() -> int:
         answer_file=answer_file,
         max_iterations=max(1, args.max_iterations),
         include_reasoning_content=include_reasoning_content_effective,
+        vision_enabled=vision_enabled,
+        github_token=args.github_token,
     )
     return 0
 

@@ -122,6 +122,7 @@ class ActionRunner:
         self.prompt_template = os.environ.get("INPUT_PROMPT_TEMPLATE", "")
         self.comment_prompt_template = os.environ.get("INPUT_COMMENT_PROMPT_TEMPLATE", "")
         self.llm_config_json = os.environ.get("INPUT_LLM_CONFIG_JSON", "")
+        self.config_file = os.environ.get("INPUT_CONFIG_FILE", ".github/repository-ai-tool/llm-config.json")
         self.litellm_package = os.environ.get("INPUT_LITELLM_PACKAGE", "litellm")
         self.analysis_max_iterations = int(os.environ.get("INPUT_ANALYSIS_MAX_ITERATIONS", "12"))
         self.copilot_model = os.environ.get("INPUT_COPILOT_MODEL", "gpt-5.4")
@@ -324,13 +325,37 @@ class ActionRunner:
             raise RuntimeError("Input copilot-github-token is empty after trimming blank lines.")
         return secrets.choice(tokens), len(tokens)
 
-    def choose_analysis_path(self) -> str:
+    def load_llm_config(self) -> str:
+        """Resolve the LLM config JSON string from input or a repository file.  Result is cached."""
+        cached = getattr(self, "_llm_config_cache", None)
+        if cached is not None:
+            return cached
+
         if self.llm_config_json.strip():
+            self.log(f"Using llm-config-json from action input ({len(self.llm_config_json)} chars).")
+            self._llm_config_cache = self.llm_config_json
+            return self._llm_config_cache
+
+        config_path = self.resolve_workspace_path(self.config_file)
+        if config_path.is_file():
+            content = config_path.read_text(encoding="utf-8").strip()
+            if content:
+                self.log(f"Loaded LLM config from repository file: {self.config_file} ({len(content)} chars).")
+                self._llm_config_cache = content
+                return self._llm_config_cache
+
+        self._llm_config_cache = ""
+        return ""
+
+    def choose_analysis_path(self) -> str:
+        if self.load_llm_config():
             return "litellm"
         if self.copilot_github_token.strip():
             return "copilot"
         raise RuntimeError(
-            "Neither llm-config-json nor copilot-github-token was provided. Pass llm-config-json for LiteLLM or copilot-github-token for Copilot CLI fallback."
+            "Neither llm-config-json nor a valid config-file was provided, and copilot-github-token is empty. "
+            "Pass llm-config-json for LiteLLM, place a config file at .github/repository-ai-tool/llm-config.json, "
+            "or provide copilot-github-token for Copilot CLI fallback."
         )
 
     def run_process_with_streaming(self, command: list[str], env: dict[str, str]) -> int:
@@ -367,13 +392,14 @@ class ActionRunner:
         append_text(self.copilot_execution_log_file, "\n".join(block) + "\n")
 
     def run_litellm(self) -> int:
+        llm_config = self.load_llm_config()
         self.install_litellm()
         self.log("LiteLLM invocation parameters:")
         self.log(f"  repo: {self.repository}")
         self.log(f"  issue-number: {self.issue_number}")
         self.log(f"  comment-id: {self.comment_id}")
         self.log(f"  comment-url: {self.comment_url}")
-        self.log(f"  llm-config-json-length: {len(self.llm_config_json)}")
+        self.log(f"  llm-config-json-length: {len(llm_config)}")
         self.log(f"  max-iterations: {self.analysis_max_iterations}")
         self.log(f"  stream-update-interval-seconds: {self.stream_update_interval}")
         self.log(f"  analysis-prompt-file: {self.analysis_prompt_file}")
@@ -395,7 +421,7 @@ class ActionRunner:
             str(self.litellm_python),
             str(self.run_litellm_script),
             "--llm-config-json",
-            self.llm_config_json,
+            llm_config,
             "--analysis-prompt-file",
             str(self.analysis_prompt_file),
             "--answer-file",
@@ -408,6 +434,8 @@ class ActionRunner:
             self.github_token,
             "--max-iterations",
             str(self.analysis_max_iterations),
+            "--bot-name",
+            self.bot_name,
         ]
         return_code = self.run_process_with_streaming(command, os.environ.copy())
         self.append_process_output("Analysis output")

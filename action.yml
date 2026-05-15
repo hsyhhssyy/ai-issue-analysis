@@ -42,9 +42,13 @@ inputs:
     required: false
     default: 补充要求：{{comment_body}}
   llm-config-json:
-    description: JSON object or array describing the LiteLLM model config. Supports fields such as provider, model, api_key, api_base or base_url, reasoning_effort, headers, litellm_params, and include_reasoning_content.
+    description: JSON object or array describing the LiteLLM model config. Supports fields such as provider, model, api_key, api_base or base_url, reasoning_effort, headers, litellm_params, include_reasoning_content, and vision_enabled. Takes precedence over config-file when both are provided.
     required: false
     default: ""
+  config-file:
+    description: Path to a JSON config file in the repository (e.g. .github/repository-ai-tool/llm-config.json). Used when llm-config-json is empty. Supports env var placeholders like ${VAR_NAME}.
+    required: false
+    default: .github/repository-ai-tool/llm-config.json
   litellm-package:
     description: Python package spec used to install LiteLLM for the llm-config-json path.
     required: false

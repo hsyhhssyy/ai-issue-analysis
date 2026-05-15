@@ -14,38 +14,75 @@
 
 ## 快速接入
 
-### 方式一：LiteLLM（DeepSeek / OpenAI 兼容 / 100+ 模型）
+### 方式一：LiteLLM（DeepSeek / OpenAI 兼容 / 100+ 模型）— 配置文件方式（推荐）
 
 1. 准备 API Key。以 DeepSeek 为例，前往 [DeepSeek Platform](https://platform.deepseek.com/api_keys) 创建 API Key。
 
-2. 在你的 GitHub 仓库里配置两个变量（Settings → Secrets and variables → Actions）：
+2. 在你的 GitHub 仓库里配置 Secrets（Settings → Secrets and variables → Actions → Secrets）：
 
-    **Secrets 标签页** — 存放密钥：
+    - Name: `LLM_API_KEY`
+    - Secret: 上一步中生成的 API Key
 
-     - Name: `DEEPSEEK_API_KEY`
-     - Secret: 上一步中生成的 API Key
+3. 在仓库中创建配置文件 `.github/repository-ai-tool/llm-config.json`。支持配置多模型（运行时随机选一个），每个模型用各自的 Secret 提供 key，每个 Secret 内也可以放多个 key（每行一个，运行时随机选取）：
 
-    **Variables 标签页** — 存放模型配置（不含密钥）：
+    ```json
+    [
+      {
+        "provider": "deepseek",
+        "model": "deepseek-chat",
+        "api_key": "${DEEPSEEK_API_KEY}",
+        "api_base": "https://api.deepseek.com/v1",
+        "include_reasoning_content": true,
+        "reasoning_effort": "xhigh",
+        "max_output_tokens": 32000
+      },
+      {
+        "provider": "openai",
+        "model": "gpt-4o",
+        "api_key": "${OPENAI_API_KEY}",
+        "reasoning_effort": "high",
+        "max_output_tokens": 16000,
+        "vision_enabled": true
+      }
+    ]
+    ```
 
-     - Name: `LLM_CONFIG`
-     - Value: 下面的 JSON（密钥部分用 `${DEEPSEEK_API_KEY}` 占位）：
-       ```json
-       {
-         "provider": "deepseek",
-         "model": "deepseek-chat",
-         "api_key": "${DEEPSEEK_API_KEY}",
-         "include_reasoning_content": true,
-         "reasoning_effort": "xhigh",
-         "max_output_tokens": 32000
-       }
-       ```
+    对应的 Secrets 配置（Settings → Secrets and variables → Actions → Secrets）：
 
-3. 把下面两个文件拷贝到你的仓库里
+    | Secret 名称 | 值（每行一个 key） |
+    |---|---|
+    | `DEEPSEEK_API_KEY` | `sk-ds-key1`<br>`sk-ds-key2` |
+    | `OPENAI_API_KEY` | `sk-oai-key1`<br>`sk-oai-key2`<br>`sk-oai-key3` |
 
-  - 把 [`examples/ai-issue-analysis.yml`](examples/ai-issue-analysis.yml) 保存为你仓库里的 `.github/workflows/ai-issue-analysis.yml`
-  - 把 [`.claude/skills/generic-issue-log-analysis/SKILL.md`](.claude/skills/generic-issue-log-analysis/SKILL.md) 保存为你仓库里的 `.claude/skills/generic-issue-log-analysis/SKILL.md`
+4. 把下面文件拷贝到你的仓库里：
 
-4. 在 workflow 里显式把仓库 Variable `LLM_CONFIG` 传给 action：
+    - 把 [`examples/ai-issue-analysis.yml`](examples/ai-issue-analysis.yml) 保存为你仓库里的 `.github/workflows/ai-issue-analysis.yml`
+    - 把 [`.claude/skills/generic-issue-log-analysis/SKILL.md`](.claude/skills/generic-issue-log-analysis/SKILL.md) 保存为你仓库里的 `.claude/skills/generic-issue-log-analysis/SKILL.md`
+
+5. 在 workflow 中通过 `env` 传入所有需要的 Secret：
+
+    ```yaml
+    steps:
+      - uses: actions/checkout@v4
+      - name: Analyze issue with AI
+        uses: hsyhhssyy/ai-issue-analysis@main
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          bot-name: "@github-actions"
+    ```
+
+    > 配置文件中 `${VAR_NAME}` 占位符会自动替换为对应环境变量值。action 默认读取 `.github/repository-ai-tool/llm-config.json`，也可通过 `config-file` 输入指定其他路径。
+    >
+    > 想换模型、调参数？直接修改仓库里的配置文件即可，无需改动 workflow 或 GitHub Variables。
+    >
+    > 💡 **两层随机选取**：第 1 层从模型数组中随机选一个模型；第 2 层在该模型的 api_key 中按行随机选一个 key。两者组合可实现多模型 × 多 key 的负载均衡与容灾。
+
+### 方式二：LiteLLM — GitHub Variables 方式（兼容旧方案）
+
+如果你更喜欢通过 GitHub Variables 管理配置，可以在 Variables 标签页创建 `LLM_CONFIG`，然后在 workflow 中显式传入：
 
     ```yaml
     steps:
@@ -61,17 +98,13 @@
           bot-name: "@github-actions"
     ```
 
-    > 想换模型、调参数？去 GitHub Settings 改 `LLM_CONFIG` Variable 即可，workflow 文件本身只需保留这条显式传参。
-    >
-    > 如果 `llm-config-json` 里用了 `${VAR_NAME}` 占位符，需要在调用 action 的 step 上通过 `env:` 显式把对应 Secret 传进来。
+    > `llm-config-json` 优先级高于 `config-file`。如果两者都提供了，以 `llm-config-json` 为准。
     >
     > `provider` 可设为 `deepseek`（走 LiteLLM 官方 DeepSeek provider）、`openai-compatible`（走通用 OpenAI 兼容端点，需要同时传 `base_url`）、`openai`、`github` 等。完整列表见 [LiteLLM Providers](https://docs.litellm.ai/docs/providers)。
     >
-    > 仓库内的 [`.github/workflows/ai-issue-analysis.yml`](.github/workflows/ai-issue-analysis.yml) 是这个 action 仓库自身的自测 workflow，外部项目请复制 [examples/ai-issue-analysis.yml](examples/ai-issue-analysis.yml)。
+    > 如果模型支持多模态（如 `gpt-4o`、`claude-3-5-sonnet`、`gemini-1.5-pro`），设置 `"vision_enabled": true` 即可自动识别 Issue 中的截图和照片。分析过程中模型也可通过 `view_image` 工具主动查看已下载的图片附件。
 
-5. 新提个 issue 测试下能否正常运行了，或者在以前的 issue 里 `@github-actions`。
-
-### 方式二：Copilot CLI（兼容回退）
+### 方式三：Copilot CLI（兼容回退）
 
 1. 请确保你有 Copilot Pro
 2. 前往 [GitHub PAT](https://github.com/settings/personal-access-tokens) 新增一个 token  
@@ -105,18 +138,19 @@
     如果你的 workflow_dispatch 输入名不是 `issue_number`，或者你在其他事件里调用这个 action，就显式传 `issue-number`。
 
 - `github-token`: 用于创建和更新 Issue 评论
-- `copilot-github-token`: （方式二）Copilot CLI 使用的 Fine-grained token。仅在未传 `llm-config-json` 时才会用到。支持多 token 逐行填写，随机选用
-- `llm-config-json`: （方式一）JSON 对象或数组，描述 LiteLLM 模型配置。支持字段：`provider`、`model`、`api_key`、`api_base` 或 `base_url`、`reasoning_effort`、`max_output_tokens`、`temperature`、`headers`、`litellm_params`、`include_reasoning_content`（布尔值）等。字符串值中 `${VAR_NAME}` 会自动展开为同名环境变量；如果用了这类占位符，请在 workflow 的 `env:` 里显式传入对应 Secret。传数组时每次运行随机选一个。`include_reasoning_content` 主要用于 DeepSeek thinking 模式，只有在模型/Provider 判定为 DeepSeek 时才会生效。
-- `litellm-package`: （方式一）安装 LiteLLM 用的 Python 包名，默认 `litellm`
-- `analysis-max-iterations`: （方式一）工具调用最大轮次，默认 `12`
+- `copilot-github-token`: （方式三）Copilot CLI 使用的 Fine-grained token。仅在未传 `llm-config-json` 且 `config-file` 也未找到时才会用到。支持多 token 逐行填写，随机选用
+- `llm-config-json`: （方式二）JSON 对象或数组，描述 LiteLLM 模型配置。传数组时每次运行随机选一个模型配置。每个配置中的 `api_key` 支持多行（每行一个 key），运行时随机选取。字符串值中 `${VAR_NAME}` 自动展开为同名环境变量。支持字段：`provider`、`model`、`api_key`、`api_base` 或 `base_url`、`reasoning_effort`、`max_output_tokens`、`temperature`、`headers`、`litellm_params`、`include_reasoning_content`（布尔值）、`vision_enabled`（布尔值，启用多模态识图）等。**优先级高于 `config-file`**。
+- `config-file`: （方式一）仓库中 LLM 配置文件的路径，默认 `.github/repository-ai-tool/llm-config.json`。当 `llm-config-json` 为空时自动读取。JSON 格式与 `llm-config-json` 相同，同样支持 `${VAR_NAME}` 环境变量占位符和 api_key 多行随机选取。
+- `litellm-package`: （方式一/二）安装 LiteLLM 用的 Python 包名，默认 `litellm`
+- `analysis-max-iterations`: （方式一/二）工具调用最大轮次，默认 `12`
 - `bot-name`: 从 `issue_comment` 正文中剥离掉的 bot mention，比如 `@YourBot`
 - `initial-comment-body`: 开始分析时先发出的评论正文
 - `action-link-text`: 评论里展示的运行链接文字
 - `details-summary`: 分析过程折叠块的标题
 - `prompt-template`: 基础分析提示词模板
 - `comment-prompt-template`: 有评论补充要求时追加的提示词模板
-- `copilot-model`: （方式二）Copilot CLI 模型名，默认 `gpt-5.4`
-- `copilot-reasoning-effort`: （方式二）Copilot CLI reasoning effort，默认 `xhigh`
+- `copilot-model`: （方式三）Copilot CLI 模型名，默认 `gpt-5.4`
+- `copilot-reasoning-effort`: （方式三）Copilot CLI reasoning effort，默认 `xhigh`
 - `stream-update-interval-seconds`: 流式更新评论的间隔秒数，默认 `30`
 - `checkout-repository`: 是否在 action 内部自动执行 `actions/checkout`，默认 `true`
 - `extra-comment-content`: 始终追加在每次评论最末尾的额外内容，默认为空

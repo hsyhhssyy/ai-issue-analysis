@@ -31,14 +31,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 将 LLM 配置放在仓库的 .github/repository-ai-tool/llm-config.json 文件中
-      # 支持多模型（数组）和每个模型的多 key（Secret 内每行一个），运行时两层随机选取
+      # LLM_API_KEY 是一个 JSON 格式的 Secret，包含所有模型及其 API Key：
+      # {
+      #   "deepseek/deepseek-chat": "sk-xxx",
+      #   "openai/gpt-4o": "sk-yyy"
+      # }
       - name: Analyze issue with AI (config file)
         id: analysis
         uses: hsyhhssyy/ai-issue-analysis@v2
         env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
         with:
           bot-name: "@github-actions"
           github-token: ${{ secrets.GITHUB_TOKEN }}

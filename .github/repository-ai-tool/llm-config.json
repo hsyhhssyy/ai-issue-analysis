@@ -10,12 +10,10 @@
       "temperature": 0.1
     },
     {
-      "provider": "openai",
-      "model": "gpt-4o-mini",
-      "max_tokens": 4096,
-      "temperature": 0.1
+      "provider": "openrouter",
+      "model": "qwen/qwen3.5-flash-02-23"
     }
   ],
   "reasoning_model": "deepseek/deepseek-chat",
-  "vision_model": "openai/gpt-4o-mini"
+  "vision_model": "openrouter/qwen/qwen3.5-flash-02-23"
 }

@@ -1451,6 +1451,12 @@ def run_agent(
 
         if tool_calls:
             log(f"Tool calls requested: {len(tool_calls)}")
+            # Collect image-injection messages so they can be appended AFTER all
+            # tool responses.  The OpenAI-compatible API requires that tool
+            # messages immediately follow the assistant message that requested
+            # them — no other message types (user/system/assistant) may appear
+            # in between.
+            pending_image_injections: list[dict[str, Any]] = []
             for tool_call in tool_calls:
                 raw_arguments = tool_call.get("arguments") or "{}"
                 try:
@@ -1477,7 +1483,7 @@ def run_agent(
                             if data_url:
                                 if reasoning_supports_vision:
                                     # Reasoning model can see images — inject directly.
-                                    messages.append(
+                                    pending_image_injections.append(
                                         {
                                             "role": "user",
                                             "content": [
@@ -1487,14 +1493,14 @@ def run_agent(
                                         }
                                     )
                                     injected_image = True
-                                    log(f"Image injected into conversation: {img_path}")
+                                    log(f"Image will be injected after all tool responses: {img_path}")
                                 elif vision_params is not None:
                                     # Reasoning model cannot see images — pre-analyze with vision model.
                                     log(f"Pre-analyzing image with vision model: {img_path}")
                                     analysis_text = _analyze_image_with_vision_model(data_url, img_path, vision_params)
                                     safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", Path(img_path).name or "image")
                                     analysis_rel_path = Path(".cache/issue-analysis-downloads/vision_analysis") / f"{safe_name}.md"
-                                    messages.append(
+                                    pending_image_injections.append(
                                         {
                                             "role": "user",
                                             "content": (
@@ -1507,7 +1513,7 @@ def run_agent(
                                         }
                                     )
                                     injected_image = True
-                                    log(f"Vision analysis injected for: {img_path}")
+                                    log(f"Vision analysis will be injected after all tool responses: {img_path}")
                     except (json.JSONDecodeError, KeyError):
                         pass  # fall through to normal tool result handling
 
@@ -1529,6 +1535,13 @@ def run_agent(
                         "content": tool_output,
                     }
                 )
+
+            # Append any pending image-injection messages AFTER all tool responses
+            # to satisfy: assistant(tool_calls) → tool(s) → ... → other messages
+            for injection_msg in pending_image_injections:
+                messages.append(injection_msg)
+            if pending_image_injections:
+                log(f"Appended {len(pending_image_injections)} image injection message(s) after all tool responses.")
             continue
 
         if assistant_content:

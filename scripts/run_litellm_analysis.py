@@ -431,12 +431,18 @@ def fetch_issue_context(repo: str, issue_number: str, github_token: str, bot_nam
     comments = http_request_json(f"{base_url}/comments?per_page=100", headers=headers)
 
     bot_lower = bot_name.strip().lower()
+
+    # Filter out the bot's own comments so they don't pollute the analysis context.
+    if bot_lower:
+        comments = [
+            c for c in comments
+            if (c.get("user", {}).get("login", "") or "").lower() != bot_lower
+        ]
+
     attachment_urls: list[str] = []
     # Always include URLs from the issue body.
     attachment_urls.extend(extract_urls(issue.get("body", "")))
     for comment in comments:
-        if bot_lower and (comment.get("user", {}).get("login", "") or "").lower() == bot_lower:
-            continue  # Skip bot's own comments to avoid re-fetching its own action links
         attachment_urls.extend(extract_urls(comment.get("body", "")))
 
     deduped_urls: list[str] = []

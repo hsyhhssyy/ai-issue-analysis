@@ -4,45 +4,41 @@ End-to-end (E2E) automated test for AI Issue Analysis.
 
 This script:
   1. Creates a test issue on a specified GitHub repository
-  2. Triggers a workflow_dispatch to run the AI analysis on that issue
-  3. Polls the GitHub Actions run until it completes
-  4. Reads the AI's analysis comment reply
-  5. Optionally closes / cleans up the test issue
+     (the workflow auto-triggers via ``issues.opened`` — no manual dispatch)
+  2. Waits for the corresponding GitHub Actions run to appear and complete
+  3. Downloads logs, artifacts, and reads the AI analysis comment
+  4. Optionally closes / cleans up the test issue
 
 Prerequisites:
   - GitHub CLI (`gh`) installed and authenticated
-  - The target repository must have the `ai-issue-analysis.yml` workflow set up
+  - The target repository must have the ``ai-issue-analysis.yml`` workflow set up
+    with ``on: issues: types: [opened]`` trigger
   - Required permissions: issues:write, actions:read on the target repository
 
 Usage:
-  # Basic: test on the current repo (infer owner/repo from git remote)
+  # Test on the current repo (infer owner/repo from git remote)
   python scripts/test/test_e2e.py
 
-  # Specify a target repository and issue title/body
-  python scripts/test/test_e2e.py \
-    --repo owner/my-repo \
-    --title "测试: 应用启动报错" \
-    --body "启动时出现以下错误：\n\n```\nError: Cannot find module 'express'\n```\n\n请问如何解决？" \
-    --workflow ai-issue-analysis.yml
+  # Read issue body from a file
+  python scripts/test/test_e2e.py \\
+    --repo owner/my-repo \\
+    --body-file .temp/test-issue.md
 
-  # Keep the test issue open after the test (no cleanup)
+  # Keep the test issue open after the test
   python scripts/test/test_e2e.py --no-cleanup
-
-  # Output full action run logs
-  python scripts/test/test_e2e.py --verbose
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import textwrap
 import time
-import urllib.error
-import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +47,7 @@ from typing import Any
 # Constants
 # ---------------------------------------------------------------------------
 POLL_INTERVAL_SECONDS = 15
+RUN_APPEAR_TIMEOUT_SECONDS = 60  # how long to wait for the run to appear
 MAX_POLL_MINUTES = 30
 MAX_POLL_ITERATIONS = (MAX_POLL_MINUTES * 60) // POLL_INTERVAL_SECONDS
 
@@ -65,7 +62,7 @@ DEFAULT_ISSUE_BODY = textwrap.dedent(
 
     我在运行项目时遇到了以下问题：
 
-    1. 执行 `npm start` 后，终端输出以下错误：
+    1. 执行 `npm start` 后，终端出现错误
     2. 尝试过重新安装依赖，但问题依旧
 
     ### 错误日志
@@ -97,18 +94,34 @@ DEFAULT_WORKFLOW_FILENAME = "ai-issue-analysis.yml"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def run_gh(args: list[str], *, check: bool = True, timeout: int = 60, input: str | None = None) -> subprocess.CompletedProcess:
+def run_gh(
+    args: list[str],
+    *,
+    check: bool = True,
+    timeout: int = 60,
+    input: str | None = None,
+) -> subprocess.CompletedProcess:
     """Run `gh` CLI with the given arguments and return the result."""
     cmd = ["gh"] + args
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False, input=input)
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=timeout, check=False,
+        input=input,
+    )
     if check and result.returncode != 0:
         print(f"[ERROR] gh command failed: {' '.join(cmd)}", file=sys.stderr)
         print(f"  stderr: {result.stderr.strip()}", file=sys.stderr)
-        raise RuntimeError(f"gh command failed (exit {result.returncode}): {result.stderr.strip()}")
+        raise RuntimeError(
+            f"gh command failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
     return result
 
 
-def gh_api(endpoint: str, *, method: str = "GET", payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def gh_api(
+    endpoint: str,
+    *,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Call the GitHub API via `gh api`."""
     args = ["api", endpoint, "--method", method]
     input_data: str | None = None
@@ -127,7 +140,6 @@ def get_default_repo() -> str:
     if result.returncode == 0:
         data = json.loads(result.stdout)
         return data.get("nameWithOwner", "")
-    # Fallback: try parsing git remote
     result = subprocess.run(
         ["git", "remote", "get-url", "origin"],
         capture_output=True, text=True, check=False,
@@ -141,12 +153,19 @@ def get_default_repo() -> str:
     return ""
 
 
-def poll_action_run(repo: str, run_id: int, *, verbose: bool = False) -> dict[str, Any]:
-    """Poll a GitHub Actions run until it completes.
+def hash_digest(s: str, length: int = 8) -> str:
+    """Return a short hex digest of a string for unique naming."""
+    return hashlib.sha256(s.encode()).hexdigest()[:length]
 
-    Returns the concluded run data from the API.
-    """
-    print(f"  Polling run {run_id} (every {POLL_INTERVAL_SECONDS}s, up to {MAX_POLL_MINUTES} min)...")
+
+def poll_action_run(
+    repo: str, run_id: int, *, verbose: bool = False,
+) -> dict[str, Any]:
+    """Poll a GitHub Actions run until it completes."""
+    print(
+        f"  Polling run {run_id} (every {POLL_INTERVAL_SECONDS}s, "
+        f"up to {MAX_POLL_MINUTES} min)..."
+    )
     for iteration in range(1, MAX_POLL_ITERATIONS + 1):
         time.sleep(POLL_INTERVAL_SECONDS)
         run_data = gh_api(f"/repos/{repo}/actions/runs/{run_id}")
@@ -166,8 +185,44 @@ def poll_action_run(repo: str, run_id: int, *, verbose: bool = False) -> dict[st
     )
 
 
-def get_latest_comment_id(repo: str, issue_number: int, bot_user: str = "") -> str | None:
-    """Get the first comment on the issue (presumably the AI's comment) from a bot user."""
+def find_latest_run_by_issue(
+    repo: str,
+    workflow_filename: str,
+    after_time: str,
+    *,
+    max_retries: int = 6,
+    retry_delay: int = 10,
+) -> dict[str, Any] | None:
+    """Find the most recent workflow run triggered by an issues.opened event
+    that was created *after* the given ISO timestamp.
+    """
+    for attempt in range(1, max_retries + 1):
+        print(f"  Checking for runs (attempt {attempt}/{max_retries}) ...")
+        data = gh_api(
+            f"/repos/{repo}/actions/workflows/{workflow_filename}/runs"
+            f"?event=issues&per_page=10"
+        )
+        runs: list[dict[str, Any]] = data.get("workflow_runs", [])
+
+        for run in runs:
+            created_at = run.get("created_at", "")
+            if created_at > after_time:
+                run_id = run.get("id")
+                run_url = run.get("html_url", "")
+                print(f"  Found matching run #{run_id}: {run_url}")
+                return run
+
+        if attempt < max_retries:
+            print(f"  No matching run yet, retrying in {retry_delay}s ...")
+            time.sleep(retry_delay)
+
+    return None
+
+
+def get_latest_comment_id(
+    repo: str, issue_number: int, bot_user: str = "",
+) -> str | None:
+    """Get the first comment on the issue from the bot user (or any comment)."""
     comments = gh_api(f"/repos/{repo}/issues/{issue_number}/comments")
     if not comments:
         return None
@@ -178,7 +233,6 @@ def get_latest_comment_id(repo: str, issue_number: int, bot_user: str = "") -> s
             continue
         return str(comment.get("id", ""))
 
-    # If no bot_user filter, just return the first comment
     return str(comments[0].get("id", "")) if comments else None
 
 
@@ -186,15 +240,6 @@ def get_comment_body(repo: str, comment_id: str) -> str:
     """Get the body of a specific comment."""
     comment = gh_api(f"/repos/{repo}/issues/comments/{comment_id}")
     return comment.get("body", "")
-
-
-def list_workflow_runs(repo: str, workflow_filename: str, event: str = "workflow_dispatch", per_page: int = 5) -> list[dict[str, Any]]:
-    """List recent workflow runs for a given workflow file."""
-    data = gh_api(
-        f"/repos/{repo}/actions/workflows/{workflow_filename}/runs"
-        f"?event={event}&per_page={per_page}"
-    )
-    return data.get("workflow_runs", [])
 
 
 def get_workflow_run_jobs(repo: str, run_id: int) -> list[dict[str, Any]]:
@@ -214,18 +259,19 @@ def get_job_logs(repo: str, job_id: int) -> str:
     return f"[Failed to fetch logs: {result.stderr.strip()}]"
 
 
-def download_action_logs(repo: str, run_id: int, output_dir: Path) -> list[Path]:
-    """Download all logs for a workflow run.
-
-    Returns a list of saved log file paths.
-    """
+def download_action_logs(
+    repo: str, run_id: int, output_dir: Path,
+) -> list[Path]:
+    """Download all logs for a workflow run."""
     log_paths: list[Path] = []
     jobs = get_workflow_run_jobs(repo, run_id)
     print(f"\n  Job count: {len(jobs)}")
     for job in jobs:
         job_id = job.get("id")
         job_name = job.get("name", f"job-{job_id}")
-        safe_name = "".join(c if c.isalnum() or c in "._- " else "_" for c in job_name)
+        safe_name = "".join(
+            c if c.isalnum() or c in "._- " else "_" for c in job_name
+        )
         log_file = output_dir / f"{safe_name}.log"
         logs = get_job_logs(repo, job_id)
         log_file.write_text(logs, encoding="utf-8")
@@ -234,11 +280,10 @@ def download_action_logs(repo: str, run_id: int, output_dir: Path) -> list[Path]
     return log_paths
 
 
-def download_artifacts(repo: str, run_id: int, output_dir: Path) -> list[Path]:
-    """Download all artifacts from a workflow run using gh run download.
-
-    Returns a list of directories/files downloaded.
-    """
+def download_artifacts(
+    repo: str, run_id: int, output_dir: Path,
+) -> list[Path]:
+    """Download all artifacts from a workflow run using gh run download."""
     output_dir.mkdir(parents=True, exist_ok=True)
     result = run_gh(
         ["run", "download", str(run_id), "--repo", repo, "--dir", str(output_dir)],
@@ -264,7 +309,7 @@ def clean_up_issue(repo: str, issue_number: int) -> None:
 
 
 def create_test_issue(repo: str, title: str, body: str) -> dict[str, Any]:
-    """Create a test issue on the repository."""
+    """Create a test issue and return the issue data from the API."""
     print(f"  Creating test issue on {repo} ...")
     result = gh_api(
         f"/repos/{repo}/issues",
@@ -277,23 +322,6 @@ def create_test_issue(repo: str, title: str, body: str) -> dict[str, Any]:
     return result
 
 
-def trigger_workflow_dispatch(
-    repo: str,
-    workflow_filename: str,
-    issue_number: int,
-    ref: str = "main",
-) -> None:
-    """Trigger a workflow_dispatch to analyze the given issue."""
-    print(f"  Triggering workflow '{workflow_filename}' on {repo} (ref: {ref}) ...")
-    run_gh([
-        "workflow", "run", workflow_filename,
-        "--repo", repo,
-        "--ref", ref,
-        "--field", f"issue_number={issue_number}",
-    ])
-    print("  Workflow triggered. Waiting a few seconds for the run to appear ...")
-
-
 # ---------------------------------------------------------------------------
 # Main test runner
 # ---------------------------------------------------------------------------
@@ -302,17 +330,20 @@ def run_e2e_test(
     repo: str,
     title: str,
     body: str,
-    workflow_filename: str,
-    ref: str,
     bot_user: str,
     cleanup: bool,
     verbose: bool,
     output_dir: Path,
 ) -> int:
     """Run the full E2E test and return an exit code (0 = success)."""
-    # ---- Phase 1: Create test issue ----
+    # Record time before creating issue, to match the run later
+    pre_time = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    unique_id = hash_digest(pre_time)
+    title = f"{title} [{unique_id}]"
+
+    # ---- Phase 1: Create test issue (auto-triggers workflow via issues.opened) ----
     print("\n" + "=" * 60)
-    print("Phase 1: Create test issue")
+    print("Phase 1: Create test issue (workflow auto-triggered via issues.opened)")
     print("=" * 60)
     issue = create_test_issue(repo, title, body)
     issue_number = issue.get("number")
@@ -321,30 +352,31 @@ def run_e2e_test(
         return 1
 
     try:
-        # ---- Phase 2: Trigger workflow ----
+        # ---- Phase 2: Find the auto-triggered workflow run ----
         print("\n" + "=" * 60)
-        print("Phase 2: Trigger workflow_dispatch")
+        print("Phase 2: Find auto-triggered workflow run")
         print("=" * 60)
-        trigger_workflow_dispatch(repo, workflow_filename, issue_number, ref=ref)
-
-        # ---- Phase 3: Find the triggered run ----
-        print("\n" + "=" * 60)
-        print("Phase 3: Find triggered workflow run")
-        print("=" * 60)
-        time.sleep(10)  # Give GitHub a moment to register the run
-        runs = list_workflow_runs(repo, workflow_filename, event="workflow_dispatch")
-        if not runs:
-            print("[FAIL] No workflow runs found after trigger.", file=sys.stderr)
+        print(
+            f"  Waiting up to {RUN_APPEAR_TIMEOUT_SECONDS}s "
+            "for the workflow to start ..."
+        )
+        run = find_latest_run_by_issue(
+            repo, DEFAULT_WORKFLOW_FILENAME, after_time=pre_time,
+        )
+        if not run:
+            print(
+                f"[FAIL] No workflow run appeared within "
+                f"{RUN_APPEAR_TIMEOUT_SECONDS}s after creating the issue. "
+                "Check that the workflow has 'issues.opened' trigger.",
+                file=sys.stderr,
+            )
             return 1
 
-        latest_run = runs[0]
-        run_id = latest_run.get("id")
-        run_url = latest_run.get("html_url", "")
-        print(f"  Found run #{run_id}: {run_url}")
+        run_id = run.get("id")
 
-        # ---- Phase 4: Poll for completion ----
+        # ---- Phase 3: Poll for completion ----
         print("\n" + "=" * 60)
-        print("Phase 4: Wait for action to complete")
+        print("Phase 3: Wait for action to complete")
         print("=" * 60)
         try:
             completed_run = poll_action_run(repo, run_id, verbose=verbose)
@@ -355,9 +387,9 @@ def run_e2e_test(
         conclusion = completed_run.get("conclusion", "unknown")
         print(f"\n  Run conclusion: {conclusion}")
 
-        # ---- Phase 5: Download logs and artifacts ----
+        # ---- Phase 4: Download logs and artifacts ----
         print("\n" + "=" * 60)
-        print("Phase 5: Download logs and artifacts")
+        print("Phase 4: Download logs and artifacts")
         print("=" * 60)
         log_dir = output_dir / f"run-{run_id}-logs"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -366,13 +398,13 @@ def run_e2e_test(
         artifact_dir = output_dir / f"run-{run_id}-artifacts"
         download_artifacts(repo, run_id, artifact_dir)
 
-        # ---- Phase 6: Verify the AI comment ----
+        # ---- Phase 5: Verify the AI comment ----
         print("\n" + "=" * 60)
-        print("Phase 6: Verify AI analysis comment")
+        print("Phase 5: Verify AI analysis comment")
         print("=" * 60)
         print("  Waiting for comment to be posted (up to 60s)...")
         comment_id = None
-        for wait_second in range(1, 61):
+        for _ in range(60):
             time.sleep(1)
             comment_id = get_latest_comment_id(repo, issue_number, bot_user=bot_user)
             if comment_id:
@@ -382,23 +414,23 @@ def run_e2e_test(
             comment_body = get_comment_body(repo, comment_id)
             print(f"  Found comment #{comment_id} ({len(comment_body)} chars)")
 
-            # Save comment for inspection
             comment_file = output_dir / f"run-{run_id}-comment.md"
             comment_file.write_text(comment_body, encoding="utf-8")
             print(f"  Saved comment to: {comment_file}")
 
-            # Print preview
             preview = comment_body[:500].replace("\n", "\\n")
-            print(f"\n  Comment preview (first 500 chars):")
+            print("\n  Comment preview (first 500 chars):")
             print(f"  {preview}...")
 
             if conclusion == "success" and comment_body:
-                print("\n  [PASS] Action completed successfully and AI posted a response.")
+                print("\n  [PASS] Action succeeded and AI posted a response.")
             else:
-                print(f"\n  [WARN] Action conclusion is '{conclusion}', comment may be an error message.")
+                print(
+                    f"\n  [WARN] Action conclusion is '{conclusion}', "
+                    "comment may be an error message."
+                )
         else:
             print("  [WARN] No comment found from the AI bot.")
-            print("  The action may have failed before posting a comment.")
 
         # Collect results
         results = {
@@ -407,10 +439,14 @@ def run_e2e_test(
             "run_id": run_id,
             "conclusion": conclusion,
             "has_comment": comment_id is not None,
-            "comment_length": len(get_comment_body(repo, comment_id)) if comment_id else 0,
+            "comment_length": (
+                len(get_comment_body(repo, comment_id)) if comment_id else 0
+            ),
         }
         result_file = output_dir / f"run-{run_id}-results.json"
-        result_file.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+        result_file.write_text(
+            json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
         print(f"\n  Results saved to: {result_file}")
 
         print("\n" + "=" * 60)
@@ -419,14 +455,16 @@ def run_e2e_test(
         return 0 if conclusion == "success" else 2
 
     finally:
-        # ---- Cleanup ----
         if cleanup:
             print("\n" + "=" * 60)
             print("Cleanup: Close test issue")
             print("=" * 60)
             clean_up_issue(repo, issue_number)
         else:
-            print(f"\n  [INFO] Skipping cleanup. Issue #{issue_number} left open on {repo}.")
+            print(
+                f"\n  [INFO] Skipping cleanup. "
+                f"Issue #{issue_number} left open on {repo}."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -446,12 +484,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--title",
         default=DEFAULT_ISSUE_TITLE,
-        help=f"Test issue title. Default: '{DEFAULT_ISSUE_TITLE}'",
+        help="Test issue title.",
     )
     parser.add_argument(
         "--body",
         default=DEFAULT_ISSUE_BODY,
-        help="Test issue body. Default: a sample Node.js error report.",
+        help="Test issue body.",
     )
     parser.add_argument(
         "--body-file",
@@ -460,20 +498,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Read test issue body from a file (overrides --body).",
     )
     parser.add_argument(
-        "--workflow",
-        default=DEFAULT_WORKFLOW_FILENAME,
-        help=f"Workflow filename. Default: {DEFAULT_WORKFLOW_FILENAME}",
-    )
-    parser.add_argument(
-        "--ref",
-        default="main",
-        help="Git ref (branch/tag) to trigger the workflow on. Default: main",
-    )
-    parser.add_argument(
         "--bot-user",
         default="",
-        help="GitHub username of the AI bot (for comment filtering). "
-        "If empty, returns the first comment on the issue.",
+        help="GitHub username of the AI bot (for comment filtering).",
     )
     parser.add_argument(
         "--no-cleanup",
@@ -492,7 +519,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--output-dir",
         type=Path,
         default=Path(".cache/e2e-test-results"),
-        help="Directory to store test artifacts and logs. Default: .cache/e2e-test-results",
+        help="Directory to store test artifacts.",
     )
     return parser.parse_args(argv)
 
@@ -500,18 +527,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
-    # Resolve repository
     repo = args.repo or get_default_repo()
     if not repo:
         print(
             "[ERROR] Could not determine repository. "
-            "Use --repo owner/repo or run this script from a git repo with a GitHub remote.",
+            "Use --repo owner/repo or run from a git repo with a GitHub remote.",
             file=sys.stderr,
         )
         return 1
     print(f"Target repository: {repo}")
 
-    # Resolve issue body
     body = args.body
     if args.body_file:
         if args.body_file.is_file():
@@ -520,16 +545,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[ERROR] Body file not found: {args.body_file}", file=sys.stderr)
             return 1
 
-    # Create output directory
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Run test
     return run_e2e_test(
         repo=repo,
         title=args.title,
         body=body,
-        workflow_filename=args.workflow,
-        ref=args.ref,
         bot_user=args.bot_user,
         cleanup=args.cleanup,
         verbose=args.verbose,

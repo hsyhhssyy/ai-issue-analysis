@@ -44,6 +44,7 @@ jobs:
         with:
           bot-name: "@github-actions"
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          analysis-max-iterations: "100"
 
       - name: 查看完整输入输出
         if: always()
